@@ -1,0 +1,16 @@
+node_modules/
+logs/
+*.lock
+cooldown.json
+session_state.json
+debug_*.html
+debug_*.js
+test_*.js
+inspect_*.js
+extract_*.js
+json_blob_*.json
+feed_query_blob.json
+full_blob_*.json
+scraper_deploy.zip
+.env
+cookies.json

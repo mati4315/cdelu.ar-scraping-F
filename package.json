@@ -1,0 +1,24 @@
+{
+  "name": "facebook-scraper",
+  "version": "1.0.0",
+  "description": "Robusto scraper de Facebook para hosting compartido (SSR JSON)",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dry": "set DRY_RUN=true && node app.js",
+    "debug": "set LOG_LEVEL=debug && node app.js",
+    "dry:debug": "set DRY_RUN=true && set LOG_LEVEL=debug && node app.js",
+    "db:init": "node -e \"require('dotenv').config(); require('./db').initTables().then(()=>{console.log('Tablas OK'); process.exit()})\""
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "mysql2": "^3.12.0",
+    "uuid": "^10.0.0",
+    "winston": "^3.17.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
