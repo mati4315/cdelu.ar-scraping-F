@@ -108,6 +108,25 @@ async function main() {
 
     await sendTelegramAlert(telegramMsg);
 
+    // 11. Enviar contenido de cada post nuevo por Telegram
+    if (stats.newPosts && stats.newPosts.length > 0) {
+      for (const post of stats.newPosts) {
+        // Limitar el texto a ~600 chars para no exceder límites de Telegram
+        let text = post.text || '(sin texto)';
+        if (text.length > 600) text = text.substring(0, 597) + '...';
+
+        const groupTag = post.group ? `<i>${post.group}</i>\n` : '';
+        const postMsg =
+          `<b>${post.author}</b>\n` +
+          `${groupTag}` +
+          `${text}`;
+
+        await sendTelegramAlert(postMsg);
+        // Pequeña pausa entre mensajes para no saturar la API
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
     logger.info('══════════════════════════════════════════════');
     logger.info(`Resumen: ${stats.summary}`);
     logger.info('Ejecución exitosa.');

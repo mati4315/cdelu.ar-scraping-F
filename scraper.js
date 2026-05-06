@@ -31,6 +31,7 @@ class FacebookScraper {
       postsFailed: 0,
       pagesScraped: 0,
       errors: 0,
+      newPosts: [],
     };
     this.shouldStop = false;
     this.totalPostsProcessed = 0;
@@ -405,10 +406,22 @@ class FacebookScraper {
       const groupLabel = postData.group_name ? `[${postData.group_name}] ` : '';
       logger.info(`  [DRY RUN] Post ${postId.substring(0, 15)}... ${groupLabel}por ${postData.author_name}: "${postData.content.substring(0, 80)}..."`);
       this.stats.postsNew++;
+      this.stats.newPosts.push({
+        id: postId,
+        author: postData.author_name,
+        group: postData.group_name || '',
+        text: postData.content || '',
+      });
     } else {
       const result = await db.upsertPost(postData);
       if (result.action === 'inserted') {
         this.stats.postsNew++;
+        this.stats.newPosts.push({
+          id: postId,
+          author: postData.author_name,
+          group: postData.group_name || '',
+          text: postData.content || '',
+        });
         logger.info(`  NUEVO: ${postId.substring(0, 15)}... - ${postData.author_name}`);
       } else if (result.action === 'updated') {
         this.stats.postsUpdated++;
