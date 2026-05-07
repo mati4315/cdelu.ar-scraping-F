@@ -15,3 +15,4 @@ full_blob_*.json
 scraper_deploy.zip
 .env
 cookies.json
+desktop.ini
