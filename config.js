@@ -18,6 +18,12 @@ module.exports = {
   // ─── Facebook ──────────────────────────────────────────────
   fb: {
     baseUrl: 'https://www.facebook.com',
+    feedUrls: process.env.FEED_URLS
+      ? process.env.FEED_URLS.split(',').map(s => s.trim())
+      : [
+          'https://www.facebook.com/groups/feed/',
+          'https://www.facebook.com/?filter=all&sk=h_chr',
+        ],
     homeUrl: 'https://www.facebook.com/groups/feed/',
     profileUrl: 'https://www.facebook.com/me',    // Health check
     cookiesFile: process.env.FB_COOKIES_FILE || './cookies.json',

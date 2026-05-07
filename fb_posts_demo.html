@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>FB Posts</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head><body><div class="container-fluid py-4"><h2 class="text-center mb-4">FB Posts - newest</h2><div class="row g-3" id="posts-grid"></div><nav aria-label="Page navigation" class="d-flex justify-content-center mt-4"><ul class="pagination" id="fb-pagination"></ul></nav></div><script>
+document.addEventListener('DOMContentLoaded', function(){
+  const cards = Array.from(document.querySelectorAll('.fb-post-card'));
+  const limit = 10;
+  const total = cards.length;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const pager = document.getElementById('fb-pagination');
+  function showPage(p){
+    const start = (p-1)*limit;
+    const end = p*limit;
+    cards.forEach((c, idx)=>{ c.style.display = (idx>=start && idx<end) ? 'block' : 'none'; });
+  }
+  function renderPagination(){
+    pager.innerHTML = '';
+    for(let i=1;i<=totalPages;i++){
+      const li = document.createElement('li');
+      li.className = 'page-item' + (i===1 ? ' active':'');
+      const a = document.createElement('a');
+      a.className = 'page-link';
+      a.href = '#'; a.textContent = i;
+      a.addEventListener('click', function(e){ e.preventDefault(); showPage(i); pager.querySelectorAll('.page-item').forEach(p=>p.classList.remove('active')); li.classList.add('active'); });
+      li.appendChild(a);
+      pager.appendChild(li);
+    }
+  }
+  if (totalPages > 1) renderPagination();
+  showPage(1);
+});
+</script>

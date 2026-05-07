@@ -41,14 +41,14 @@ class FacebookScraper {
     this._lastContent = '';
     this._postCountSinceDistraction = 0;
     this._seenStoryIds = new Set();
+    this._rateLimitHits = 0;
   }
 
   async init() {
     this.cookies = loadCookies();
     if (!this.cookies) throw new Error('No se pudieron cargar las cookies.');
     this.cookieHeader = cookiesToHeader(this.cookies);
-    this.userAgent = getRandomUserAgent();
-    logger.info(`User-Agent: ${this.userAgent.substring(0, 60)}...`);
+    logger.info(`Sesión iniciada. UA rotativo por request. Ejemplo: ${getRandomUserAgent().substring(0, 60)}...`);
   }
 
   _getHumanHeaders() {
@@ -59,7 +59,7 @@ class FacebookScraper {
       Math.floor(Math.random() * config.headerVariants.accept.length)
     ];
     return {
-      'User-Agent': this.userAgent,
+      'User-Agent': getRandomUserAgent(),
       'Accept': accept,
       'Accept-Language': lang,
       'Accept-Encoding': 'gzip, deflate, br',
@@ -108,78 +108,108 @@ class FacebookScraper {
   }
 
   async scrape() {
-    let currentUrl = config.fb.homeUrl;
-    let pagesScraped = 0;
+    const feedUrls = config.fb.feedUrls || [config.fb.homeUrl];
+    let totalPagesScraped = 0;
 
-    while (pagesScraped < config.scraping.maxPages && !this.shouldStop) {
-      logger.info(`Scrapeando página ${pagesScraped + 1}: ${currentUrl}`);
+    for (let fi = 0; fi < feedUrls.length && !this.shouldStop; fi++) {
+      const feedUrl = feedUrls[fi];
+      let currentUrl = feedUrl;
+      let feedPages = 0;
 
-      let html;
-      try {
-        html = await this._fetchPage(currentUrl);
-      } catch (err) {
-        logger.error(`Error cargando página: ${err.message}`);
-        this.stats.errors++;
-        await db.logError(this.batchId, null, err.message, 'page_fetch_error', currentUrl);
-        break;
-      }
+      logger.info(`Feed ${fi + 1}/${feedUrls.length}: ${currentUrl}`);
 
-      if (this._detectLoginPage(html) || this._detectCheckpoint(html)) {
-        triggerCooldown('SESSION_LOST_DURING_SCRAPE');
-        this.shouldStop = true;
-        break;
-      }
+      while (totalPagesScraped < config.scraping.maxPages && !this.shouldStop) {
+        logger.info(`Scrapeando página ${totalPagesScraped + 1} (feed #${fi + 1} pág ${feedPages + 1}): ${currentUrl}`);
 
-      // Simular tiempo de "settling" después de cargar la página
-      const settlingMs = config.human.pageSettlingMin +
-        Math.floor(Math.random() * (config.human.pageSettlingMax - config.human.pageSettlingMin));
-      logger.debug(`  → Página cargada. "Mirando" por ${settlingMs}ms...`);
-      await sleep(settlingMs);
+        let html;
+        try {
+          html = await this._fetchPage(currentUrl);
+        } catch (err) {
+          if (err.response && err.response.status === 429) {
+            this._rateLimitHits++;
+            logger.warn(`Rate limit HTTP 429 detectado (hit ${this._rateLimitHits}).`);
+            this.stats.errors++;
+            await db.logError(this.batchId, null, 'HTTP 429 Too Many Requests', 'rate_limit', currentUrl);
+            if (this._rateLimitHits >= 3) {
+              logger.crit('Demasiados rate limits. Activando cooldown extendido.');
+              triggerCooldown('RATE_LIMITED');
+              this.shouldStop = true;
+            }
+            const backoff = config.scraping.minDelayMs * (2 + this._rateLimitHits);
+            logger.debug(`Backoff de ${backoff}ms por rate limiting...`);
+            await sleep(backoff);
+            break;
+          }
+          logger.error(`Error cargando página: ${err.message}`);
+          this.stats.errors++;
+          await db.logError(this.batchId, null, err.message, 'page_fetch_error', currentUrl);
+          break;
+        }
 
-      // Extraer posts del SSR JSON
-      const posts = this._extractPostsFromSSR(html);
-      logger.info(`  → ${posts.length} posts extraídos del SSR.`);
-
-      for (let i = 0; i < posts.length; i++) {
-        if (this.shouldStop) break;
-        if (this.totalPostsProcessed >= config.scraping.maxPostsPerRun) {
-          logger.info(`Límite de ${config.scraping.maxPostsPerRun} posts alcanzado.`);
+        if (this._detectLoginPage(html) || this._detectCheckpoint(html)) {
+          triggerCooldown('SESSION_LOST_DURING_SCRAPE');
           this.shouldStop = true;
           break;
         }
 
-        try {
-          await this._processPostData(posts[i]);
-        } catch (err) {
-          logger.error(`Error procesando post: ${err.message}`);
-          this.stats.postsFailed++;
-          this.stats.errors++;
+        // Simular tiempo de "settling" después de cargar la página
+        const settlingMs = config.human.pageSettlingMin +
+          Math.floor(Math.random() * (config.human.pageSettlingMax - config.human.pageSettlingMin));
+        logger.debug(`  → Página cargada. "Mirando" por ${settlingMs}ms...`);
+        await sleep(settlingMs);
+
+        // Extraer posts del SSR JSON
+        const posts = this._extractPostsFromSSR(html);
+        logger.info(`  → ${posts.length} posts extraídos del SSR.`);
+
+        for (let i = 0; i < posts.length; i++) {
+          if (this.shouldStop) break;
+          if (this.totalPostsProcessed >= config.scraping.maxPostsPerRun) {
+            logger.info(`Límite de ${config.scraping.maxPostsPerRun} posts alcanzado.`);
+            this.shouldStop = true;
+            break;
+          }
+
+          try {
+            await this._processPostData(posts[i]);
+          } catch (err) {
+            logger.error(`Error procesando post: ${err.message}`);
+            this.stats.postsFailed++;
+            this.stats.errors++;
+          }
+
+          if (i < posts.length - 1 && !this.shouldStop) {
+            await this._humanPostDelay(this._lastContent);
+            await this._maybeDistractionPause();
+          }
         }
 
-        if (i < posts.length - 1 && !this.shouldStop) {
-          await this._humanPostDelay(this._lastContent);
-          await this._maybeDistractionPause();
+        totalPagesScraped++;
+        feedPages++;
+        this.stats.pagesScraped = totalPagesScraped;
+
+        if (!this.shouldStop) {
+          const nextUrl = this._extractNextPageUrl(html, currentUrl);
+          if (nextUrl) {
+            currentUrl = nextUrl;
+            const delay = this._naturalDelay(config.scraping.minDelayMs, config.scraping.maxDelayMs);
+            logger.debug(`Pausa de ${delay}ms antes de siguiente página...`);
+            await sleep(delay);
+          } else {
+            logger.info(`No se encontró enlace de siguiente página para feed ${feedUrl}.`);
+            break;
+          }
         }
       }
 
-      pagesScraped++;
-      this.stats.pagesScraped = pagesScraped;
-
-      if (!this.shouldStop) {
-        const nextUrl = this._extractNextPageUrl(html);
-        if (nextUrl) {
-          currentUrl = nextUrl;
-          const delay = this._naturalDelay(config.scraping.minDelayMs, config.scraping.maxDelayMs);
-          logger.debug(`Pausa de ${delay}ms antes de siguiente página...`);
-          await sleep(delay);
-        } else {
-          logger.info('No se encontró enlace de siguiente página. Fin del scraping.');
-          break;
-        }
+      if (fi < feedUrls.length - 1 && !this.shouldStop) {
+        const delay = this._naturalDelay(config.scraping.minDelayMs, config.scraping.maxDelayMs);
+        logger.debug(`Pausa de ${delay}ms antes del siguiente feed...`);
+        await sleep(delay);
       }
     }
 
-    logger.info(`Scraping finalizado. ${this.totalPostsProcessed} posts procesados en ${pagesScraped} páginas.`);
+    logger.info(`Scraping finalizado. ${this.totalPostsProcessed} posts procesados en ${totalPagesScraped} páginas.`);
     return this.stats;
   }
 
@@ -257,6 +287,7 @@ class FacebookScraper {
         let authorName = null;
         let authorUrl = null;
         let authorPic = null;
+        let authorId = null;
         let groupName = null;
         let groupUrl = null;
         let nodeIdMatch;
@@ -276,9 +307,12 @@ class FacebookScraper {
             // Encontrar el node_id asociado buscando "story_bucket" después de este actor
             const afterActor = blobStr.substring(actorMatch.index);
             const nodeMatch = afterActor.match(/"story_bucket":\{"nodes":\[\{[^}]*"id":"(\d+)"/);
+            // Extraer el id del actor (facebook numeric id)
+            const nearActor = blobStr.substring(Math.max(0, actorMatch.index - 100), actorMatch.index + 500);
+            const authorIdMatch = nearActor.match(/"id":"(\d{5,30})"/);
             if (nodeMatch) {
               const nodeId = nodeMatch[1];
-              actorMap.set(nodeId, { name, url, pic });
+              actorMap.set(nodeId, { name, url, pic, id: authorIdMatch ? authorIdMatch[1] : null });
             }
           }
         }
@@ -309,7 +343,7 @@ class FacebookScraper {
             const nearbyGroup = blobStr.substring(groupMatch.index, Math.min(blobStr.length, groupMatch.index + 300));
             const gidMatch = nearbyGroup.match(/"id":"(\d+)"/);
             if (gidMatch) {
-              groupUrl = 'https://www.facebook.com/groups/' + gidMatch[1] + '/';
+              groupUrl = gidMatch[1];
             }
           }
         }
@@ -323,18 +357,20 @@ class FacebookScraper {
         let anMatch;
         while ((anMatch = actorNameRegex.exec(blobStr)) !== null) {
           const name = anMatch[1];
-          if (!/Bundle|Worker|display|order|className|everyone|checksum|like|love|haha|wow|sad|angry|connection_quality|latency_level|is_ad|content_category|streaming_implementation|is_latency_sensitive|fbls_tier|is_live|GLOBAL|WAWeb|MAW|FileHash|Canvas|VideoPlayer|MWChat/.test(name)) {
+            if (!/Bundle|Worker|display|order|className|everyone|checksum|like|love|haha|wow|sad|angry|connection_quality|latency_level|is_ad|content_category|streaming_implementation|is_latency_sensitive|fbls_tier|is_live|GLOBAL|WAWeb|MAW|FileHash|Canvas|VideoPlayer|MWChat/.test(name)) {
             const dist = Math.abs(anMatch.index - storyIdx);
             if (!author || dist < author.dist) {
               // Verificar si este nombre está cerca de un url de perfil de facebook
               const nearby = blobStr.substring(Math.max(0, anMatch.index - 200), Math.min(blobStr.length, anMatch.index + 500));
               const urlMatch = nearby.match(/"url":"((?:https?:)?\\\/\\\/www\.facebook\.com\\\/[^"]+)"/);
               const picMatch = nearby.match(/"profile_picture":\{"uri":"([^"]+)"/);
+              const idMatch = nearby.match(/"id":"(\d{5,30})"/);
               if (urlMatch) {
                 author = { 
                   name, 
                   url: urlMatch[1].replace(/\\\//g, '/'),
                   pic: picMatch ? picMatch[1].replace(/\\\//g, '/') : null,
+                  id: idMatch ? idMatch[1] : null,
                   dist 
                 };
               }
@@ -346,22 +382,30 @@ class FacebookScraper {
           authorName = author.name;
           authorUrl = author.url;
           authorPic = author.pic;
+          authorId = author.id || null;
         }
 
         // Construir el post si tiene datos suficientes
         if (authorName || text) {
-          // Extraer imágenes asociadas a este story
+          // Extraer medios y metadata asociada a este story dentro del SSR cercano.
           const images = this._extractImagesFromBlob(blobStr, storyIdx);
+          const videos = this._extractVideosFromBlob(blobStr, storyIdx);
+          const postLink = this._extractPostLinkFromBlob(blobStr, storyIdx);
+          const timestamp = this._extractTimestampFromBlob(blobStr, storyIdx);
 
           stories.push({
             story_id: storyId,
             author_name: authorName || 'Unknown',
+            author_id: authorId || null,
             author_profile_url: authorUrl,
             author_profile_pic: authorPic,
             group_name: groupName,
             group_url: groupUrl,
             text: text || '',
             images: images,
+            videos: videos,
+            post_link: postLink,
+            post_timestamp: timestamp,
             raw_story_id: storyId,
           });
         }
@@ -381,41 +425,122 @@ class FacebookScraper {
     const images = [];
     const seen = new Set();
 
-    const start = Math.max(0, storyIdx - 3000);
-    const end = Math.min(blobStr.length, storyIdx + 8000);
+    const start = Math.max(0, storyIdx - 5000);
+    const end = Math.min(blobStr.length, storyIdx + 14000);
     const nearby = blobStr.substring(start, end);
 
-    // Buscar URIs de imágenes de Facebook (scontent, fbcdn)
-    // Patrón más permisivo para URLs con parámetros
-    const uriPattern = /"uri":"(https?:\\\/\\\/scontent[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"/gi;
-    let match;
-    while ((match = uriPattern.exec(nearby)) !== null) {
-      let url = match[1].replace(/\\\//g, '/');
-      // Filtrar URLs de perfil/thumbnails muy chicos
-      if (!/_s24x24|_s48x48|_s50x50|_s100x100|_s130x130/.test(url)) {
-        if (!seen.has(url)) { seen.add(url); images.push(url); }
+    const patterns = [
+      /"(?:uri|url)":"(https?:\\\/\\\/(?:scontent|[^\"]*fbcdn)[^\"]*\.(?:jpg|jpeg|png|webp)[^\"]*)"/gi,
+      /"(?:image|large_image|preview_image|preferred_thumbnail|background_image|photo_image)":\{[^}]*?"uri":"(https?:\\\/\\\/[^\"]+)"/gi,
+      /"(?:image|large_image|preview_image|preferred_thumbnail|background_image|photo_image)":\{[^}]*?"url":"(https?:\\\/\\\/[^\"]+)"/gi,
+    ];
+
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(nearby)) !== null) {
+        this._pushMediaUrl(images, seen, match[1], 'image');
       }
     }
 
-    // background_image
-    const bgPattern = /"background_image":\{"uri":"(https?:\\\/\\\/scontent[^"]+)"/gi;
-    while ((match = bgPattern.exec(nearby)) !== null) {
-      const url = match[1].replace(/\\\//g, '/');
-      if (!/_s24x24|_s48x48|_s50x50/.test(url) && !seen.has(url)) {
-        seen.add(url); images.push(url);
+    return filterValidImages(images).sort((a, b) => this._imageScore(b) - this._imageScore(a));
+  }
+
+  _extractVideosFromBlob(blobStr, storyIdx) {
+    const videos = [];
+    const seen = new Set();
+    const start = Math.max(0, storyIdx - 5000);
+    const end = Math.min(blobStr.length, storyIdx + 16000);
+    const nearby = blobStr.substring(start, end);
+
+    const patterns = [
+      /"(?:playable_url_quality_hd|playable_url|browser_native_hd_url|browser_native_sd_url|video_url)":"(https?:\\\/\\\/[^\"]+)"/gi,
+      /"url":"(https?:\\\/\\\/www\.facebook\.com\\\/[^\"]*(?:watch|video|videos)[^\"]*)"/gi,
+      /"href":"(https?:\\\/\\\/www\.facebook\.com\\\/[^\"]*(?:watch|video|videos)[^\"]*)"/gi,
+    ];
+
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(nearby)) !== null) {
+        this._pushMediaUrl(videos, seen, match[1], 'video');
       }
     }
 
-    // attached_media / image
-    const mediaPattern = /"image":\{"uri":"(https?:\\\/\\\/scontent[^"]+)"/gi;
-    while ((match = mediaPattern.exec(nearby)) !== null) {
-      const url = match[1].replace(/\\\//g, '/');
-      if (!/_s24x24|_s48x48|_s50x50/.test(url) && !seen.has(url)) {
-        seen.add(url); images.push(url);
+    return videos;
+  }
+
+  _extractPostLinkFromBlob(blobStr, storyIdx) {
+    const start = Math.max(0, storyIdx - 4000);
+    const end = Math.min(blobStr.length, storyIdx + 12000);
+    const nearby = blobStr.substring(start, end);
+    const patterns = [
+      /"(?:url|wwwURL|permalink_url)":"(https?:\\\/\\\/www\.facebook\.com\\\/[^\"]*(?:story\.php|permalink|posts|photo\.php|video\.php)[^\"]*)"/i,
+      /"(?:url|wwwURL|permalink_url)":"(\\\/groups\\\/[^\"]*\\\/(?:posts|permalink)\\\/[^\"]+)"/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = nearby.match(pattern);
+      if (match) {
+        const url = this._decodeJsonUrl(match[1]);
+        return url.startsWith('/') ? config.fb.baseUrl + url : url;
       }
     }
+    return null;
+  }
 
-    return images;
+  _extractTimestampFromBlob(blobStr, storyIdx) {
+    const start = Math.max(0, storyIdx - 4000);
+    const end = Math.min(blobStr.length, storyIdx + 12000);
+    const nearby = blobStr.substring(start, end);
+    const unixMatch = nearby.match(/"(?:creation_time|publish_time|timestamp|creation_timestamp)":(\d{10})/i);
+    if (unixMatch) return new Date(parseInt(unixMatch[1], 10) * 1000).toISOString();
+
+    const textMatch = nearby.match(/"(?:publish_time_text|creation_time_text|timestamp_text)":\{?"text":"((?:[^"\\]|\\[^])+)"/i);
+    if (textMatch) return this._decodeJsonText(textMatch[1]);
+    return null;
+  }
+
+  _pushMediaUrl(target, seen, rawUrl, type) {
+    const url = this._decodeJsonUrl(rawUrl);
+    if (!url || seen.has(url) || isFbSpinnerOrIcon(url) || !isValidUrl(url)) return;
+    if (type === 'image' && !this._isPostImageUrl(url)) return;
+    if (type === 'video' && !this._isVideoUrl(url)) return;
+    seen.add(url);
+    target.push(url);
+  }
+
+  _decodeJsonUrl(rawUrl) {
+    if (!rawUrl) return '';
+    return rawUrl
+      .replace(/\\\//g, '/')
+      .replace(/\\u0025/g, '%')
+      .replace(/\\u0026/g, '&')
+      .replace(/\\u003d/g, '=')
+      .replace(/&amp;/g, '&');
+  }
+
+  _decodeJsonText(rawText) {
+    return rawText
+      .replace(/\\n/g, '\n')
+      .replace(/\\"/g, '"')
+      .replace(/\\u([0-9a-fA-F]{4})/g, (_, c) => String.fromCharCode(parseInt(c, 16)));
+  }
+
+  _isPostImageUrl(url) {
+    if (!/\.(jpg|jpeg|png|webp)(?:\?|$)/i.test(url)) return false;
+    if (/(?:profile|avatar|emoji|sticker|reaction|static)/i.test(url)) return false;
+    if (/_s(?:24|32|40|48|50|56|64|72|100|130)x(?:24|32|40|48|50|56|64|72|100|130)/i.test(url)) return false;
+    return /scontent|fbcdn|safe_image/i.test(url);
+  }
+
+  _isVideoUrl(url) {
+    return /\.mp4(?:\?|$)|fbcdn.*video|facebook\.com\/(?:watch|.*video|.*videos)/i.test(url);
+  }
+
+  _imageScore(url) {
+    const dims = url.match(/_(?:p)?(\d{2,4})x(\d{2,4})/i);
+    if (dims) return parseInt(dims[1], 10) * parseInt(dims[2], 10);
+    if (/\boh=|\bstp=|\boe=/.test(url)) return 1000000;
+    return 0;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -430,40 +555,48 @@ class FacebookScraper {
 
     this._lastContent = post.text;
 
-    // Derivar post_id del raw_story_id
-    const postId = post.story_id || crypto.createHash('md5').update(post.text + post.author_name).digest('hex').substring(0, 20);
-
     // Descargar imágenes si está activado
     let imagePaths = post.images || [];
     if (config.scraping.downloadImages && imagePaths.length > 0) {
       imagePaths = await this._downloadImages(post.group_name || post.story_id, imagePaths);
     }
 
+    logger.debug(`  Medios detectados: ${imagePaths.length} imagen(es), ${(post.videos || []).length} video(s).`);
+
+    // id_unico: author_id + mes + semana_mes + primeros_20_chars_limpios_del_contenido
+    const cleanText = (post.text || '')
+      .replace(/\s+/g, '')
+      .replace(/[^a-zA-Z0-9áéíóúñÁÉÍÓÚÑ]/g, '')
+      .substring(0, 20);
+    const uidAuthor = post.author_id || '0';
+    const tsDate = post.post_timestamp ? new Date(post.post_timestamp) : new Date();
+    const month = tsDate.getUTCMonth() + 1;
+    const weekOfMonth = Math.ceil(tsDate.getUTCDate() / 7);
+    const idUnico = `${uidAuthor}${month}${weekOfMonth}${cleanText}`;
+
     const postData = {
-      post_id: postId,
-      scrape_batch_id: this.batchId,
+      id_unico: idUnico,
       author_name: post.author_name,
-      author_profile_url: post.author_profile_url,
-      author_profile_pic: post.author_profile_pic,
+      author_id: post.author_id || null,
       group_name: post.group_name,
       group_url: post.group_url,
       content: post.text,
-      content_hash: crypto.createHash('sha256').update(post.text || '').digest('hex'),
-      original_post_link: post.author_profile_url || '',
-      post_timestamp: null,
+      content_hash: crypto.createHash('sha256').update(JSON.stringify({
+        text: post.text || '',
+        images: imagePaths,
+        videos: post.videos || [],
+        timestamp: post.post_timestamp || null,
+      })).digest('hex'),
       images: imagePaths,
-      video_links: [],
-      reaction_count: 0,
-      comment_count: 0,
-      share_count: 0,
+      video_links: post.videos || [],
     };
 
     if (config.dryRun) {
       const groupLabel = postData.group_name ? `[${postData.group_name}] ` : '';
-      logger.info(`  [DRY RUN] Post ${postId.substring(0, 15)}... ${groupLabel}por ${postData.author_name}: "${postData.content.substring(0, 80)}..."`);
+      logger.info(`  [DRY RUN] Post ${idUnico.substring(0, 18)}... ${groupLabel}por ${postData.author_name}: "${postData.content.substring(0, 80)}..."`);
       this.stats.postsNew++;
       this.stats.newPosts.push({
-        id: postId,
+        id: idUnico,
         author: postData.author_name,
         group: postData.group_name || '',
         text: postData.content || '',
@@ -473,18 +606,18 @@ class FacebookScraper {
       if (result.action === 'inserted') {
         this.stats.postsNew++;
         this.stats.newPosts.push({
-          id: postId,
+          id: idUnico,
           author: postData.author_name,
           group: postData.group_name || '',
           text: postData.content || '',
         });
-        logger.info(`  NUEVO: ${postId.substring(0, 15)}... - ${postData.author_name}`);
+        logger.info(`  NUEVO: ${idUnico.substring(0, 18)}... - ${postData.author_name}`);
       } else if (result.action === 'updated') {
         this.stats.postsUpdated++;
-        logger.info(`  ACTUALIZADO: ${postId.substring(0, 15)}... - ${postData.author_name}`);
+        logger.info(`  ACTUALIZADO: ${idUnico.substring(0, 18)}... - ${postData.author_name}`);
       } else {
         this.stats.postsSkipped++;
-        logger.debug(`  SKIP: ${postId.substring(0, 15)}... sin cambios.`);
+        logger.debug(`  SKIP: ${idUnico.substring(0, 18)}... sin cambios.`);
       }
     }
 
@@ -497,7 +630,7 @@ class FacebookScraper {
    */
   async _downloadImages(groupOrId, urls) {
     // Sanitizar nombre de carpeta: solo letras, números, espacios y guiones
-    const folderName = groupOrId
+    const folderName = String(groupOrId || 'sin_grupo')
       .replace(/[^a-zA-Z0-9áéíóúñÁÉÍÓÚÑ ]/g, '')
       .trim()
       .substring(0, 50) || 'sin_grupo';
@@ -511,8 +644,9 @@ class FacebookScraper {
     for (let i = 0; i < urls.length; i++) {
       try {
         const url = urls[i];
-        const ext = url.match(/\.(jpg|jpeg|png|webp)/i)?.[1] || 'jpg';
-        const filename = `${i + 1}.${ext}`;
+        const ext = url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || 'jpg';
+        const hash = crypto.createHash('sha1').update(url).digest('hex').substring(0, 16);
+        const filename = `${i + 1}-${hash}.${ext}`;
         const filepath = path.join(dir, filename);
 
         // Saltar si ya existe
@@ -524,11 +658,17 @@ class FacebookScraper {
         const resp = await axios.get(url, {
           responseType: 'arraybuffer',
           timeout: 15000,
+          maxContentLength: 15 * 1024 * 1024,
           headers: {
-            'User-Agent': this.userAgent,
+            'User-Agent': getRandomUserAgent(),
             'Referer': 'https://www.facebook.com/',
           },
         });
+
+        const contentType = String(resp.headers['content-type'] || '').toLowerCase();
+        if (!contentType.startsWith('image/')) {
+          throw new Error(`respuesta no es imagen (${contentType || 'sin content-type'})`);
+        }
 
         fs.writeFileSync(filepath, Buffer.from(resp.data));
         localPaths.push(filepath);
@@ -618,7 +758,7 @@ class FacebookScraper {
     }
   }
 
-  _extractNextPageUrl(html) {
+  _extractNextPageUrl(html, currentUrl) {
     // Buscar cursor de paginación en el SSR JSON (no en CSS colores)
     // El cursor real tiene un formato largo (base64 o similar)
     const pattern = /<script type="application\/json"[^>]*data-sjs[^>]*>([\s\S]*?)<\/script>/g;
@@ -630,8 +770,9 @@ class FacebookScraper {
       let cm;
       while ((cm = cursorRegex.exec(content)) !== null) {
         const cursor = cm[1];
-        const baseUrl = config.fb.homeUrl;
-        const sep = baseUrl.includes('?') ? '&' : '?';
+        // Usar la URL actual del feed como base, no homeUrl fijo
+        const baseUrl = currentUrl.split('?')[0];
+        const sep = '?';
         return `${baseUrl}${sep}cursor=${encodeURIComponent(cursor)}`;
       }
     }

@@ -16,3 +16,5 @@ scraper_deploy.zip
 .env
 cookies.json
 desktop.ini
+ssh_access.txt
+backups/

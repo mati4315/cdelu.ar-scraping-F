@@ -19,30 +19,21 @@ async function initTables() {
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS fb_posts (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        post_id VARCHAR(100) UNIQUE NOT NULL,
+        id_unico VARCHAR(100) UNIQUE NOT NULL,
         author_name VARCHAR(255) NOT NULL,
-        author_profile_url VARCHAR(500),
-        author_profile_pic TEXT,
+        author_id VARCHAR(50),
         group_name VARCHAR(255),
         group_url VARCHAR(500),
         content LONGTEXT,
         content_hash VARCHAR(64),
-        original_post_link TEXT NOT NULL,
-        post_timestamp VARCHAR(50),
         images JSON,
         video_links JSON,
-        reaction_count INT DEFAULT 0,
-        comment_count INT DEFAULT 0,
-        share_count INT DEFAULT 0,
         scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        scrape_batch_id VARCHAR(36),
-        scrape_status ENUM('new','updated','failed','skipped') DEFAULT 'new',
-        INDEX idx_post_id (post_id),
+        INDEX idx_unico (id_unico),
         INDEX idx_author (author_name),
         INDEX idx_group (group_name),
-        INDEX idx_scraped (scraped_at),
-        INDEX idx_batch (scrape_batch_id)
+        INDEX idx_scraped (scraped_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
@@ -145,73 +136,65 @@ async function logError(batchId, postId, errorMessage, errorType, url) {
 async function upsertPost(postData) {
   const p = await getPool();
 
-  if (!postData.post_id) {
-    return { action: 'skipped', reason: 'no post_id' };
+  if (!postData.id_unico) {
+    return { action: 'skipped', reason: 'no id_unico' };
   }
 
   const [existing] = await p.execute(
-    'SELECT post_id, content_hash FROM fb_posts WHERE post_id = ?',
-    [postData.post_id]
+    'SELECT id_unico, content_hash, images, video_links FROM fb_posts WHERE id_unico = ?',
+    [postData.id_unico]
   );
+
+  const nextImagesJson = postData.images ? JSON.stringify(postData.images) : null;
+  const nextVideosJson = postData.video_links ? JSON.stringify(postData.video_links) : null;
 
   if (existing.length === 0) {
     await p.execute(
       `INSERT INTO fb_posts
-        (post_id, author_name, author_profile_url, author_profile_pic,
+        (id_unico, author_name, author_id,
          group_name, group_url,
-         content, content_hash, original_post_link, post_timestamp,
-         images, video_links, reaction_count, comment_count, share_count,
-         scrape_batch_id, scrape_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')`,
+         content, content_hash,
+         images, video_links)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        postData.post_id,
+        postData.id_unico,
         postData.author_name,
-        postData.author_profile_url || null,
-        postData.author_profile_pic || null,
+        postData.author_id || null,
         postData.group_name || null,
         postData.group_url || null,
         postData.content || '',
         postData.content_hash || null,
-        postData.original_post_link || '',
-        postData.post_timestamp || null,
-        postData.images ? JSON.stringify(postData.images) : null,
-        postData.video_links ? JSON.stringify(postData.video_links) : null,
-        postData.reaction_count || 0,
-        postData.comment_count || 0,
-        postData.share_count || 0,
-        postData.scrape_batch_id || null,
+        nextImagesJson,
+        nextVideosJson,
       ]
     );
     return { action: 'inserted' };
   }
 
-  if (existing[0].content_hash !== postData.content_hash) {
+  const existingImagesJson = normalizeJsonColumn(existing[0].images);
+  const existingVideosJson = normalizeJsonColumn(existing[0].video_links);
+  const mediaChanged = existingImagesJson !== normalizeJsonColumn(nextImagesJson) ||
+    existingVideosJson !== normalizeJsonColumn(nextVideosJson);
+
+  if (existing[0].content_hash !== postData.content_hash || mediaChanged) {
     await p.execute(
       `UPDATE fb_posts SET
-        author_name = ?, author_profile_url = ?, author_profile_pic = ?,
+        author_name = ?, author_id = ?,
         group_name = ?, group_url = ?,
-        content = ?, content_hash = ?, original_post_link = ?,
-        post_timestamp = ?, images = ?, video_links = ?,
-        reaction_count = ?, comment_count = ?, share_count = ?,
-        scrape_batch_id = ?, scrape_status = 'updated', updated_at = NOW()
-       WHERE post_id = ?`,
+        content = ?, content_hash = ?,
+        images = ?, video_links = ?,
+        updated_at = NOW()
+       WHERE id_unico = ?`,
       [
         postData.author_name,
-        postData.author_profile_url || null,
-        postData.author_profile_pic || null,
+        postData.author_id || null,
         postData.group_name || null,
         postData.group_url || null,
         postData.content || '',
         postData.content_hash || null,
-        postData.original_post_link || '',
-        postData.post_timestamp || null,
-        postData.images ? JSON.stringify(postData.images) : null,
-        postData.video_links ? JSON.stringify(postData.video_links) : null,
-        postData.reaction_count || 0,
-        postData.comment_count || 0,
-        postData.share_count || 0,
-        postData.scrape_batch_id || null,
-        postData.post_id,
+        nextImagesJson,
+        nextVideosJson,
+        postData.id_unico,
       ]
     );
     return { action: 'updated' };
@@ -220,16 +203,16 @@ async function upsertPost(postData) {
   return { action: 'skipped', reason: 'unchanged' };
 }
 
-/**
- * Verifica si un post_id ya existe en la DB.
- */
-async function postExists(postId) {
-  const p = await getPool();
-  const [rows] = await p.execute(
-    'SELECT 1 FROM fb_posts WHERE post_id = ? LIMIT 1',
-    [postId]
-  );
-  return rows.length > 0;
+function normalizeJsonColumn(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    try {
+      return JSON.stringify(JSON.parse(value));
+    } catch {
+      return value;
+    }
+  }
+  return JSON.stringify(value);
 }
 
 async function closePool() {
@@ -247,6 +230,5 @@ module.exports = {
   finishScrapeRun,
   logError,
   upsertPost,
-  postExists,
   closePool,
 };

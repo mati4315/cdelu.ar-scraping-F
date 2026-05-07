@@ -4,3 +4,7 @@ npm run dry		Prueba: mismo flujo pero sin tocar la DB
 npm run debug		Producción con logs detallados (nivel debug)
 npm run dry:debug	Prueba con logs detallados, sin tocar DB
 npm run debug:init	Crea/recrea las tablas en MySQL si no existen	
+
+
+Generar html
+node scripts/generate_fb_posts_html.js --limit 20 --page 1
