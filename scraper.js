@@ -436,7 +436,7 @@ class FacebookScraper {
     // Descargar imágenes si está activado
     let imagePaths = post.images || [];
     if (config.scraping.downloadImages && imagePaths.length > 0) {
-      imagePaths = await this._downloadImages(postId, imagePaths);
+      imagePaths = await this._downloadImages(post.group_name || post.story_id, imagePaths);
     }
 
     const postData = {
@@ -495,9 +495,13 @@ class FacebookScraper {
    * Descarga imágenes de URLs de Facebook a disco local.
    * Retorna array de paths locales.
    */
-  async _downloadImages(postId, urls) {
-    const shortId = postId.substring(0, 12).replace(/[^a-zA-Z0-9]/g, '_');
-    const dir = path.join(config.scraping.imageDir, this.batchId, shortId);
+  async _downloadImages(groupOrId, urls) {
+    // Sanitizar nombre de carpeta: solo letras, números, espacios y guiones
+    const folderName = groupOrId
+      .replace(/[^a-zA-Z0-9áéíóúñÁÉÍÓÚÑ ]/g, '')
+      .trim()
+      .substring(0, 50) || 'sin_grupo';
+    const dir = path.join(config.scraping.imageDir, folderName);
     
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -528,10 +532,10 @@ class FacebookScraper {
 
         fs.writeFileSync(filepath, Buffer.from(resp.data));
         localPaths.push(filepath);
-        logger.debug(`    Imagen descargada: ${filename} (${Math.round(resp.data.length / 1024)}KB)`);
+        logger.debug(`    Imagen descargada: ${folderName}/${filename} (${Math.round(resp.data.length / 1024)}KB)`);
       } catch (err) {
         logger.warn(`    No se pudo descargar imagen [${i}]: ${err.message}`);
-        localPaths.push(urls[i]); // fallback: guardar URL original
+        localPaths.push(urls[i]);
       }
     }
 
