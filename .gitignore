@@ -1,5 +1,6 @@
 node_modules/
 logs/
+images/
 *.lock
 cooldown.json
 session_state.json
