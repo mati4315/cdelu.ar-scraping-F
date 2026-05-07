@@ -31,6 +31,8 @@ module.exports = {
     requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 15000,
     maxRetries: parseInt(process.env.MAX_RETRIES, 10) || 3,
     maxPages: 5,
+    downloadImages: process.env.DOWNLOAD_IMAGES === 'true',
+    imageDir: process.env.IMAGE_DIR || './images',
   },
 
   // ─── Human Behavior Simulation ──────────────────────────────

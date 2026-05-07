@@ -1,5 +1,8 @@
 const axios = require('axios');
+const cheerio = require('cheerio');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
 const {
@@ -347,6 +350,9 @@ class FacebookScraper {
 
         // Construir el post si tiene datos suficientes
         if (authorName || text) {
+          // Extraer imágenes asociadas a este story
+          const images = this._extractImagesFromBlob(blobStr, storyIdx);
+
           stories.push({
             story_id: storyId,
             author_name: authorName || 'Unknown',
@@ -355,7 +361,7 @@ class FacebookScraper {
             group_name: groupName,
             group_url: groupUrl,
             text: text || '',
-            images: [],
+            images: images,
             raw_story_id: storyId,
           });
         }
@@ -366,6 +372,50 @@ class FacebookScraper {
     }
 
     return stories;
+  }
+
+  /**
+   * Extrae URLs de imágenes del blob JSON cerca de un story.
+   */
+  _extractImagesFromBlob(blobStr, storyIdx) {
+    const images = [];
+    const seen = new Set();
+
+    const start = Math.max(0, storyIdx - 3000);
+    const end = Math.min(blobStr.length, storyIdx + 8000);
+    const nearby = blobStr.substring(start, end);
+
+    // Buscar URIs de imágenes de Facebook (scontent, fbcdn)
+    // Patrón más permisivo para URLs con parámetros
+    const uriPattern = /"uri":"(https?:\\\/\\\/scontent[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"/gi;
+    let match;
+    while ((match = uriPattern.exec(nearby)) !== null) {
+      let url = match[1].replace(/\\\//g, '/');
+      // Filtrar URLs de perfil/thumbnails muy chicos
+      if (!/_s24x24|_s48x48|_s50x50|_s100x100|_s130x130/.test(url)) {
+        if (!seen.has(url)) { seen.add(url); images.push(url); }
+      }
+    }
+
+    // background_image
+    const bgPattern = /"background_image":\{"uri":"(https?:\\\/\\\/scontent[^"]+)"/gi;
+    while ((match = bgPattern.exec(nearby)) !== null) {
+      const url = match[1].replace(/\\\//g, '/');
+      if (!/_s24x24|_s48x48|_s50x50/.test(url) && !seen.has(url)) {
+        seen.add(url); images.push(url);
+      }
+    }
+
+    // attached_media / image
+    const mediaPattern = /"image":\{"uri":"(https?:\\\/\\\/scontent[^"]+)"/gi;
+    while ((match = mediaPattern.exec(nearby)) !== null) {
+      const url = match[1].replace(/\\\//g, '/');
+      if (!/_s24x24|_s48x48|_s50x50/.test(url) && !seen.has(url)) {
+        seen.add(url); images.push(url);
+      }
+    }
+
+    return images;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -383,6 +433,12 @@ class FacebookScraper {
     // Derivar post_id del raw_story_id
     const postId = post.story_id || crypto.createHash('md5').update(post.text + post.author_name).digest('hex').substring(0, 20);
 
+    // Descargar imágenes si está activado
+    let imagePaths = post.images || [];
+    if (config.scraping.downloadImages && imagePaths.length > 0) {
+      imagePaths = await this._downloadImages(postId, imagePaths);
+    }
+
     const postData = {
       post_id: postId,
       scrape_batch_id: this.batchId,
@@ -395,7 +451,7 @@ class FacebookScraper {
       content_hash: crypto.createHash('sha256').update(post.text || '').digest('hex'),
       original_post_link: post.author_profile_url || '',
       post_timestamp: null,
-      images: post.images,
+      images: imagePaths,
       video_links: [],
       reaction_count: 0,
       comment_count: 0,
@@ -433,6 +489,53 @@ class FacebookScraper {
     }
 
     this.totalPostsProcessed++;
+  }
+
+  /**
+   * Descarga imágenes de URLs de Facebook a disco local.
+   * Retorna array de paths locales.
+   */
+  async _downloadImages(postId, urls) {
+    const shortId = postId.substring(0, 12).replace(/[^a-zA-Z0-9]/g, '_');
+    const dir = path.join(config.scraping.imageDir, this.batchId, shortId);
+    
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const localPaths = [];
+    for (let i = 0; i < urls.length; i++) {
+      try {
+        const url = urls[i];
+        const ext = url.match(/\.(jpg|jpeg|png|webp)/i)?.[1] || 'jpg';
+        const filename = `${i + 1}.${ext}`;
+        const filepath = path.join(dir, filename);
+
+        // Saltar si ya existe
+        if (fs.existsSync(filepath)) {
+          localPaths.push(filepath);
+          continue;
+        }
+
+        const resp = await axios.get(url, {
+          responseType: 'arraybuffer',
+          timeout: 15000,
+          headers: {
+            'User-Agent': this.userAgent,
+            'Referer': 'https://www.facebook.com/',
+          },
+        });
+
+        fs.writeFileSync(filepath, Buffer.from(resp.data));
+        localPaths.push(filepath);
+        logger.debug(`    Imagen descargada: ${filename} (${Math.round(resp.data.length / 1024)}KB)`);
+      } catch (err) {
+        logger.warn(`    No se pudo descargar imagen [${i}]: ${err.message}`);
+        localPaths.push(urls[i]); // fallback: guardar URL original
+      }
+    }
+
+    return localPaths;
   }
 
   // ═══════════════════════════════════════════════════════════════
