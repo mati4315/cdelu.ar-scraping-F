@@ -18,12 +18,34 @@ module.exports = {
   // ─── Facebook ──────────────────────────────────────────────
   fb: {
     baseUrl: 'https://www.facebook.com',
-    feedUrls: process.env.FEED_URLS
-      ? process.env.FEED_URLS.split(',').map(s => s.trim())
-      : [
-          'https://www.facebook.com/groups/feed/',
-          'https://www.facebook.com/?filter=all&sk=h_chr',
-        ],
+    feedUrls: (() => {
+      const urls = process.env.FEED_URLS
+        ? process.env.FEED_URLS.split(',').map(s => s.trim())
+        : [
+            'https://www.facebook.com/groups/feed/',
+            'https://www.facebook.com/?filter=all&sk=h_chr',
+          ];
+      
+      // Agregar búsquedas por palabras clave si existen
+      if (process.env.SEARCH_KEYWORDS) {
+        const keywords = process.env.SEARCH_KEYWORDS.split(',').map(k => k.trim());
+        const recentFilter = Buffer.from(JSON.stringify({
+          "recent_posts:0": "{\"name\":\"recent_posts\",\"args\":\"\"}"
+        })).toString('base64');
+        
+        keywords.forEach(kw => {
+          urls.push(`https://www.facebook.com/search/posts/?q=${encodeURIComponent(kw)}&filters=${encodeURIComponent(recentFilter)}`);
+        });
+      }
+      // Agregar grupos directos si existen
+      if (process.env.GROUP_IDS) {
+        const groups = process.env.GROUP_IDS.split(',').map(g => g.trim());
+        groups.forEach(gid => {
+          urls.push(`https://www.facebook.com/groups/${gid}/`);
+        });
+      }
+      return urls;
+    })(),
     homeUrl: 'https://www.facebook.com/groups/feed/',
     profileUrl: 'https://www.facebook.com/me',    // Health check
     cookiesFile: process.env.FB_COOKIES_FILE || './cookies.json',
@@ -35,8 +57,7 @@ module.exports = {
     minDelayMs: parseInt(process.env.MIN_DELAY_MS, 10) || 4000,
     maxDelayMs: parseInt(process.env.MAX_DELAY_MS, 10) || 12000,
     requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 15000,
-    maxRetries: parseInt(process.env.MAX_RETRIES, 10) || 3,
-    maxPages: 5,
+    maxPages: parseInt(process.env.MAX_PAGES, 10) || 5,
     downloadImages: process.env.DOWNLOAD_IMAGES === 'true',
     imageDir: process.env.IMAGE_DIR || './images',
   },

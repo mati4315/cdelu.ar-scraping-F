@@ -26,6 +26,7 @@ const {
   cleanup,
 } = require('./helpers');
 const FacebookScraper = require('./scraper');
+const { syncToFirebase } = require('./firebase');
 
 const BATCH_ID = uuidv4();
 
@@ -150,6 +151,23 @@ async function main() {
         }
         // Pequena pausa entre mensajes para no saturar la API
         await new Promise(r => setTimeout(r, 500));
+      }
+
+      // 12. Sincronizar posts nuevos con Firebase (Comunidad)
+      for (const post of stats.newPosts) {
+        await syncToFirebase({
+          id_unico: post.id,
+          author_name: post.author,
+          author_id: post.author_id,
+          group_name: post.group,
+          group_url: post.group_url,
+          content: post.text,
+          images: post.images || [],
+          video_links: post.videos || [],
+          tags: post.tags || [],
+          post_url: post.post_url,
+        });
+        await new Promise(r => setTimeout(r, 300));
       }
     }
 

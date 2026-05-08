@@ -720,6 +720,7 @@ class FacebookScraper {
         text: postData.content || '',
         images: imagePaths,
         videos: postData.video_links || [],
+        tags: postData.tags || [],
         post_url: postData.post_url || null,
       });
     } else {
@@ -735,6 +736,7 @@ class FacebookScraper {
           text: postData.content || '',
           images: imagePaths,
           videos: postData.video_links || [],
+          tags: postData.tags || [],
           post_url: postData.post_url || null,
         });
         logger.info(`  NUEVO: ${idUnico.substring(0, 18)}... - ${postData.author_name}`);
