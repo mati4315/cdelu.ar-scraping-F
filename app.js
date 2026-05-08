@@ -1,5 +1,14 @@
 require('dotenv').config();
 
+// ── Modo servidor HTTP (Passenger / Hostinger Node.js App) ──────
+// Si existe la variable PORT, Passenger está corriendo este archivo
+// como una web app. En ese caso cargamos server.js en su lugar.
+if (process.env.PORT) {
+  require('./server');
+  return;
+}
+// ────────────────────────────────────────────────────────────────
+
 const { v4: uuidv4 } = require('uuid');
 const config = require('./config');
 const logger = require('./logger');
@@ -12,6 +21,8 @@ const {
   loadSessionState,
   saveSessionState,
   sendTelegramAlert,
+  sendTelegramPhoto,
+  sendMediaGroup,
   cleanup,
 } = require('./helpers');
 const FacebookScraper = require('./scraper');
@@ -111,18 +122,33 @@ async function main() {
     // 11. Enviar contenido de cada post nuevo por Telegram
     if (stats.newPosts && stats.newPosts.length > 0) {
       for (const post of stats.newPosts) {
-        // Limitar el texto a ~600 chars para no exceder límites de Telegram
-        let text = post.text || '(sin texto)';
-        if (text.length > 600) text = text.substring(0, 597) + '...';
+        // Texto, truncado a ~1000 chars
+        let text = post.text || '';
+        if (text.length > 1000) text = text.substring(0, 997) + '...';
 
-        const groupTag = post.group ? `<i>${post.group}</i>\n` : '';
+        const authorLink = post.author_id
+          ? `<a href="https://fb.com/${post.author_id}"><b>${post.author}</b></a>`
+          : `<b>${post.author}</b>`;
+
+        const publicLink = (post.group_url && post.post_url)
+          ? `\n\n<a href="https://fb.com/groups/${post.group_url}/posts/${post.post_url}"><b>Link a la publicacion</b></a>`
+          : '';
+
+        const videoLinks = (post.videos || []).slice(0, 3)
+          .map((url, idx) => `\n<a href="${url}"><b>Video ${idx + 1}</b></a>`)
+          .join('');
+
         const postMsg =
-          `<b>${post.author}</b>\n` +
-          `${groupTag}` +
-          `${text}`;
+          (text ? `${authorLink}\n\n${text}${publicLink}${videoLinks}` : `${authorLink}${publicLink}${videoLinks}`);
 
-        await sendTelegramAlert(postMsg);
-        // Pequeña pausa entre mensajes para no saturar la API
+        // Si hay imagenes, se envian todas juntas en un media group
+        if (post.images && post.images.length > 0) {
+          await sendMediaGroup(post.images, postMsg);
+        } else {
+          // Sin imagenes, solo texto
+          await sendTelegramAlert(postMsg);
+        }
+        // Pequena pausa entre mensajes para no saturar la API
         await new Promise(r => setTimeout(r, 500));
       }
     }

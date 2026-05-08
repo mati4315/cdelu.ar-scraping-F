@@ -310,6 +310,165 @@ async function sendTelegramAlert(message) {
   }
 }
 
+/**
+ * Envia una foto por Telegram. Soporta URLs remotas o paths locales.
+ */
+async function sendTelegramPhoto(photo, caption) {
+  const { botToken, chatId } = config.telegram;
+  if (!botToken || !chatId) {
+    logger.debug('Telegram no configurado. Saltando foto.');
+    return;
+  }
+  try {
+    if (typeof photo === 'string' && (photo.startsWith('http://') || photo.startsWith('https://'))) {
+      // URL remota: Telegram la descarga
+      await axios.post(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+        chat_id: chatId,
+        photo: photo,
+        caption: caption || undefined,
+        parse_mode: caption ? 'HTML' : undefined,
+      }, { timeout: 15000 });
+    } else if (typeof photo === 'string' && fs.existsSync(photo)) {
+      // Archivo local: upload multipart manual (sin dependencias extra)
+      await uploadLocalPhoto(botToken, chatId, photo, caption);
+    } else {
+      logger.debug(`Foto no encontrada o formato invalido: ${photo}`);
+      return;
+    }
+    logger.debug('Foto enviada por Telegram.');
+  } catch (err) {
+    logger.warn(`Error enviando foto Telegram: ${err.message}`);
+  }
+}
+
+function uploadLocalPhoto(botToken, chatId, filePath, caption) {
+  return new Promise((resolve, reject) => {
+    const https = require('https');
+    const fileBuffer = fs.readFileSync(filePath);
+    const filename = path.basename(filePath);
+    const boundary = 'WebKitFormBoundary' + Math.random().toString(36).substring(2);
+    
+    const parts = [
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${filename}"\r\nContent-Type: image/jpeg\r\n\r\n`),
+      fileBuffer,
+      Buffer.from(`\r\n`),
+    ];
+    if (caption) {
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`));
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nHTML\r\n`));
+    }
+    parts.push(Buffer.from(`--${boundary}--\r\n`));
+    
+    const body = Buffer.concat(parts);
+    
+    const req = https.request({
+      hostname: 'api.telegram.org',
+      path: `/bot${botToken}/sendPhoto`,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve());
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * Envia multiples fotos juntas en un solo mensaje (media group).
+ * Soporta URLs remotas y archivos locales.
+ * Solo el primer elemento lleva caption (limite de Telegram).
+ */
+async function sendMediaGroup(photos, caption) {
+  const { botToken, chatId } = config.telegram;
+  if (!botToken || !chatId) {
+    logger.debug('Telegram no configurado. Saltando media group.');
+    return;
+  }
+  if (!photos || photos.length === 0) return;
+  if (photos.length === 1) {
+    return sendTelegramPhoto(photos[0], caption);
+  }
+
+  const isRemote = typeof photos[0] === 'string' && (photos[0].startsWith('http://') || photos[0].startsWith('https://'));
+
+  if (isRemote) {
+    try {
+      await axios.post(`https://api.telegram.org/bot${botToken}/sendMediaGroup`, {
+        chat_id: chatId,
+        media: photos.map((url, i) => ({
+          type: 'photo',
+          media: url,
+          ...(i === 0 && caption ? { caption, parse_mode: 'HTML' } : {}),
+        })),
+      }, { timeout: 30000 });
+      logger.debug('Media group enviado por Telegram.');
+    } catch (err) {
+      logger.warn(`Error enviando media group: ${err.message}`);
+    }
+  } else {
+    try {
+      await uploadLocalMediaGroup(botToken, chatId, photos, caption);
+      logger.debug('Media group local enviado por Telegram.');
+    } catch (err) {
+      logger.warn(`Error enviando media group local: ${err.message}`);
+    }
+  }
+}
+
+function uploadLocalMediaGroup(botToken, chatId, filePaths, caption) {
+  return new Promise((resolve, reject) => {
+    const https = require('https');
+    const boundary = 'WebKitFormBoundary' + Math.random().toString(36).substring(2);
+    const maxPhotos = Math.min(filePaths.length, 3);
+
+    const media = filePaths.slice(0, maxPhotos).map((_, i) => ({
+      type: 'photo',
+      media: `attach://file${i}`,
+      ...(i === 0 && caption ? { caption, parse_mode: 'HTML' } : {}),
+    }));
+
+    const parts = [
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="media"\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(media)}\r\n`),
+    ];
+
+    for (let i = 0; i < maxPhotos; i++) {
+      const fileBuffer = fs.readFileSync(filePaths[i]);
+      const filename = path.basename(filePaths[i]);
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file${i}"; filename="${filename}"\r\nContent-Type: image/jpeg\r\n\r\n`));
+      parts.push(fileBuffer);
+      parts.push(Buffer.from(`\r\n`));
+    }
+
+    parts.push(Buffer.from(`--${boundary}--\r\n`));
+    const body = Buffer.concat(parts);
+
+    const req = https.request({
+      hostname: 'api.telegram.org',
+      path: `/bot${botToken}/sendMediaGroup`,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+      },
+    }, (res) => {
+      res.resume();
+      res.on('end', () => resolve());
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════
 // CLEANUP
 // ═══════════════════════════════════════════════════════════════
@@ -344,5 +503,7 @@ module.exports = {
   filterValidImages,
   isValidContent,
   sendTelegramAlert,
+  sendTelegramPhoto,
+  sendMediaGroup,
   cleanup,
 };

@@ -299,7 +299,7 @@ class FacebookScraper {
         const actorRegex = /"name":"([^"]{2,80})"[^}]*?"url":"((?:https?:)?\\\/\\\/www\.facebook\.com\\\/[^"]+)"[^}]*?"profile_picture":\{"uri":"([^"]+)"/g;
         let actorMatch;
         while ((actorMatch = actorRegex.exec(blobStr)) !== null) {
-          const name = actorMatch[1];
+          const name = this._decodeJsonText(actorMatch[1]);
           const url = actorMatch[2].replace(/\\\//g, '/');
           const pic = actorMatch[3].replace(/\\\//g, '/');
           
@@ -326,7 +326,7 @@ class FacebookScraper {
           const afterStory = blobStr.substring(storyIdx);
           const msgMatch = afterStory.match(/"message":\{"text":"((?:[^"\\]|\\[^])+)"/);
           if (msgMatch) {
-            text = msgMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\u([0-9a-fA-F]{4})/g, (_, c) => String.fromCharCode(parseInt(c, 16)));
+            text = this._decodeJsonText(msgMatch[1]);
           }
         }
 
@@ -338,7 +338,7 @@ class FacebookScraper {
           const dist = Math.abs(groupMatch.index - storyIdx);
           if (dist < closestGroupDist) {
             closestGroupDist = dist;
-            groupName = groupMatch[1];
+            groupName = this._decodeJsonText(groupMatch[1]);
             // Buscar el group id cerca
             const nearbyGroup = blobStr.substring(groupMatch.index, Math.min(blobStr.length, groupMatch.index + 300));
             const gidMatch = nearbyGroup.match(/"id":"(\d+)"/);
@@ -356,7 +356,7 @@ class FacebookScraper {
         const actorNameRegex = /"name":"([^"]{2,80})"/g;
         let anMatch;
         while ((anMatch = actorNameRegex.exec(blobStr)) !== null) {
-          const name = anMatch[1];
+          const name = this._decodeJsonText(anMatch[1]);
             if (!/Bundle|Worker|display|order|className|everyone|checksum|like|love|haha|wow|sad|angry|connection_quality|latency_level|is_ad|content_category|streaming_implementation|is_latency_sensitive|fbls_tier|is_live|GLOBAL|WAWeb|MAW|FileHash|Canvas|VideoPlayer|MWChat/.test(name)) {
             const dist = Math.abs(anMatch.index - storyIdx);
             if (!author || dist < author.dist) {
@@ -391,6 +391,7 @@ class FacebookScraper {
           const images = this._extractImagesFromBlob(blobStr, storyIdx);
           const videos = this._extractVideosFromBlob(blobStr, storyIdx);
           const postLink = this._extractPostLinkFromBlob(blobStr, storyIdx);
+          const postId = this._extractPostIdFromBlob(blobStr, storyIdx);
           const timestamp = this._extractTimestampFromBlob(blobStr, storyIdx);
 
           stories.push({
@@ -405,6 +406,7 @@ class FacebookScraper {
             images: images,
             videos: videos,
             post_link: postLink,
+            post_id: postId,
             post_timestamp: timestamp,
             raw_story_id: storyId,
           });
@@ -419,11 +421,11 @@ class FacebookScraper {
   }
 
   /**
-   * Extrae URLs de imágenes del blob JSON cerca de un story.
+   * Extrae URLs de imagenes del blob JSON cerca de un story.
+   * Deduplica por imagen base (misma imagen en distintas resoluciones se agrupan).
    */
   _extractImagesFromBlob(blobStr, storyIdx) {
-    const images = [];
-    const seen = new Set();
+    const dedupMap = new Map(); // baseKey → { url, score }
 
     const start = Math.max(0, storyIdx - 5000);
     const end = Math.min(blobStr.length, storyIdx + 14000);
@@ -438,30 +440,69 @@ class FacebookScraper {
     for (const pattern of patterns) {
       let match;
       while ((match = pattern.exec(nearby)) !== null) {
-        this._pushMediaUrl(images, seen, match[1], 'image');
+        const url = this._decodeJsonUrl(match[1]);
+        if (!url || isFbSpinnerOrIcon(url) || !isValidUrl(url)) continue;
+        if (!this._isPostImageUrl(url)) continue;
+
+        const key = this._getImageDedupKey(url);
+        const score = this._imageScore(url);
+        // Quedarse con la mejor resolucion para cada imagen base
+        if (!dedupMap.has(key) || score > dedupMap.get(key).score) {
+          dedupMap.set(key, { url, score });
+        }
       }
     }
 
-    return filterValidImages(images).sort((a, b) => this._imageScore(b) - this._imageScore(a));
+    return Array.from(dedupMap.values())
+      .sort((a, b) => b.score - a.score)
+      .map(v => v.url);
+  }
+
+  /**
+   * Normaliza una URL de imagen para identificar la misma imagen en distintas resoluciones.
+   */
+  _getImageDedupKey(url) {
+    const base = url.split('?')[0]; // Quitar query params
+    const segments = base.split('/');
+    const filename = segments[segments.length - 1] || base;
+    // Quitar sufijos de tamano comunes de Facebook: _s750x750_n, _1080x1080_n, _o, _n
+    return filename
+      .replace(/_s?\d{2,4}x\d{2,4}(_n)?/gi, '')  // _s750x750_n, _1080x1080_n
+      .replace(/_n\./gi, '.')                       // _n.jpg → .jpg
+      .replace(/_o\./gi, '.')                       // _o.jpg → .jpg
+      .replace(/_\d+x\d+(_n)?\./gi, '.');           // Fallback general
   }
 
   _extractVideosFromBlob(blobStr, storyIdx) {
     const videos = [];
     const seen = new Set();
-    const start = Math.max(0, storyIdx - 5000);
-    const end = Math.min(blobStr.length, storyIdx + 16000);
+    const start = Math.max(0, storyIdx - 8000);
+    const end = Math.min(blobStr.length, storyIdx + 40000);
     const nearby = blobStr.substring(start, end);
 
     const patterns = [
-      /"(?:playable_url_quality_hd|playable_url|browser_native_hd_url|browser_native_sd_url|video_url)":"(https?:\\\/\\\/[^\"]+)"/gi,
-      /"url":"(https?:\\\/\\\/www\.facebook\.com\\\/[^\"]*(?:watch|video|videos)[^\"]*)"/gi,
-      /"href":"(https?:\\\/\\\/www\.facebook\.com\\\/[^\"]*(?:watch|video|videos)[^\"]*)"/gi,
+      /"(?:playable_url_quality_hd|playable_url|playable_url_dash|browser_native_hd_url|browser_native_sd_url|hd_src|sd_src|hd_src_no_ratelimit|sd_src_no_ratelimit|video_url)":"(https?:\\\/\\\/[^\"]+)"/gi,
+      /"(?:url|href|wwwURL|permalink_url|shareURL)":"(https?:\\\/\\\/www\.facebook\.com\\\/[^\"]*(?:watch|video|videos|reel)[^\"]*)"/gi,
+      /"(?:url|href|wwwURL|permalink_url|shareURL)":"(\\\/[^\"]*(?:watch|video|videos|reel)[^\"]*)"/gi,
     ];
 
     for (const pattern of patterns) {
       let match;
       while ((match = pattern.exec(nearby)) !== null) {
-        this._pushMediaUrl(videos, seen, match[1], 'video');
+        this._pushVideoUrl(videos, seen, match[1]);
+      }
+    }
+
+    const videoIdPatterns = [
+      /"(?:video_id|videoID)":"(\d{5,30})"/gi,
+      /"__typename":"Video"[^}]{0,600}?"id":"(\d{5,30})"/gi,
+      /"video":\{[^}]{0,800}?"id":"(\d{5,30})"/gi,
+    ];
+
+    for (const pattern of videoIdPatterns) {
+      let match;
+      while ((match = pattern.exec(nearby)) !== null) {
+        this._pushVideoUrl(videos, seen, `https://www.facebook.com/watch/?v=${match[1]}`);
       }
     }
 
@@ -473,8 +514,9 @@ class FacebookScraper {
     const end = Math.min(blobStr.length, storyIdx + 12000);
     const nearby = blobStr.substring(start, end);
     const patterns = [
-      /"(?:url|wwwURL|permalink_url)":"(https?:\\\/\\\/www\.facebook\.com\\\/[^\"]*(?:story\.php|permalink|posts|photo\.php|video\.php)[^\"]*)"/i,
-      /"(?:url|wwwURL|permalink_url)":"(\\\/groups\\\/[^\"]*\\\/(?:posts|permalink)\\\/[^\"]+)"/i,
+      /"(?:url|wwwURL|permalink_url|shareURL)":"(https?:\\\/\\\/www\.facebook\.com\\\/[^\"]*(?:story\.php|permalink|posts|photo\.php|video\.php|reel|watch|videos)[^\"]*)"/i,
+      /"(?:url|wwwURL|permalink_url|shareURL)":"(\\\/groups\\\/[^\"]*\\\/(?:posts|permalink)\\\/[^\"]+)"/i,
+      /"(?:url|wwwURL|permalink_url|shareURL)":"(\\\/[^\"]*\\\/(?:permalink|posts|videos)\\\/[^\"]+)"/i,
     ];
 
     for (const pattern of patterns) {
@@ -485,6 +527,14 @@ class FacebookScraper {
       }
     }
     return null;
+  }
+
+  _extractPostIdFromBlob(blobStr, storyIdx) {
+    const start = Math.max(0, storyIdx - 4000);
+    const end = Math.min(blobStr.length, storyIdx + 12000);
+    const nearby = blobStr.substring(start, end);
+    const match = nearby.match(/"post_id":"(\d+)"/);
+    return match ? match[1] : null;
   }
 
   _extractTimestampFromBlob(blobStr, storyIdx) {
@@ -508,18 +558,29 @@ class FacebookScraper {
     target.push(url);
   }
 
+  _pushVideoUrl(target, seen, rawUrl) {
+    const decoded = this._decodeJsonUrl(rawUrl);
+    const url = decoded.startsWith('/') ? config.fb.baseUrl + decoded : decoded;
+    if (!url || seen.has(url) || !isValidUrl(url) || !this._isVideoUrl(url)) return;
+    seen.add(url);
+    target.push(url);
+  }
+
   _decodeJsonUrl(rawUrl) {
     if (!rawUrl) return '';
     return rawUrl
       .replace(/\\\//g, '/')
-      .replace(/\\u0025/g, '%')
-      .replace(/\\u0026/g, '&')
-      .replace(/\\u003d/g, '=')
+      .replace(/\\u002f/gi, '/')
+      .replace(/\\u003a/gi, ':')
+      .replace(/\\u0025/gi, '%')
+      .replace(/\\u0026/gi, '&')
+      .replace(/\\u003d/gi, '=')
       .replace(/&amp;/g, '&');
   }
 
   _decodeJsonText(rawText) {
     return rawText
+      .replace(/\\\//g, '/')
       .replace(/\\n/g, '\n')
       .replace(/\\"/g, '"')
       .replace(/\\u([0-9a-fA-F]{4})/g, (_, c) => String.fromCharCode(parseInt(c, 16)));
@@ -533,7 +594,7 @@ class FacebookScraper {
   }
 
   _isVideoUrl(url) {
-    return /\.mp4(?:\?|$)|fbcdn.*video|facebook\.com\/(?:watch|.*video|.*videos)/i.test(url);
+    return /\.mp4(?:\?|$)|video\.[^/]*fbcdn|fbcdn.*video|facebook\.com\/(?:watch|reel|video\.php|video_redirect|.*\/videos?\/|.*[?&]v=)/i.test(url);
   }
 
   _imageScore(url) {
@@ -544,11 +605,59 @@ class FacebookScraper {
   }
 
   // ═══════════════════════════════════════════════════════════════
+  // EXTRACCION DE TAGS
+  // ═══════════════════════════════════════════════════════════════
+
+  _extractTags(text) {
+    if (!text) return [];
+
+    const stopwords = new Set([
+      'de','la','el','los','las','que','en','un','una','por','para','con','no','se','su','al','del','lo',
+      'como','mas','pero','sus','le','ya','este','cuando','muy','sin','sobre','tambien','me','hasta',
+      'donde','todo','nos','ha','dos','mi','tu','te','ni','es','si','fue','son','era','mis','cada',
+      'otro','entre','porque','esto','solo','asi','tan','desde','tiene','ser','hacer','todos','tiempo',
+      'puede','estan','ahora','despues','antes','siendo','estaba','estaban','tienen','tuvo',
+      'eso','ahi','alli','aqui','ella','ellos','ellas','alguien','dia','ano','hace','hecho','parte',
+      'manera','vez','forma','tipo','caso','durante','hacia','mientras','ademas','poco','mucho','gran',
+      'buen','ese','esa','esos','esas','otra','otras','cual','cuales','tus','nuestro','nuestra',
+      'suyo','suya','tener','estar','haber','dijo','dice','hizo'
+    ]);
+
+    const priorityWords = new Set(['promo','compro','vendo','permuto']);
+
+    const words = text
+      .toLowerCase()
+      .replace(/https?:\/\/\S+|www\.\S+/gi, '')
+      .replace(/[^a-záéíóúñ\s]/g, '')
+      .split(/\s+/)
+      .filter(w => w.length >= 4 && !stopwords.has(w) && !/^\d+$/.test(w));
+
+    const seen = new Set();
+    const priority = [];
+    const normal = [];
+
+    for (const w of words) {
+      if (seen.has(w)) continue;
+      seen.add(w);
+      if (priorityWords.has(w)) {
+        priority.push(w);
+      } else {
+        normal.push(w);
+      }
+    }
+
+    // Ordenar normales por largo descendente (palabras mas largas = mas significativas)
+    normal.sort((a, b) => b.length - a.length);
+
+    return priority.concat(normal).slice(0, 4);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
   // PROCESS POST & SAVE
   // ═══════════════════════════════════════════════════════════════
 
   async _processPostData(post) {
-    if (!post.text && (!post.images || post.images.length === 0)) {
+    if (!post.text && (!post.images || post.images.length === 0) && (!post.videos || post.videos.length === 0)) {
       this.stats.postsSkipped++;
       return;
     }
@@ -589,6 +698,13 @@ class FacebookScraper {
       })).digest('hex'),
       images: imagePaths,
       video_links: post.videos || [],
+      tags: this._extractTags(post.text),
+      post_url: (() => {
+        if (post.post_id) return post.post_id;
+        const link = post.post_link || '';
+        const m = link.match(/\/(?:posts|permalink|videos|reel|photo\.php\?fbid=|story\.php\?story_fbid=)(\d+)/);
+        return m ? m[1] : null;
+      })(),
     };
 
     if (config.dryRun) {
@@ -598,8 +714,13 @@ class FacebookScraper {
       this.stats.newPosts.push({
         id: idUnico,
         author: postData.author_name,
+        author_id: postData.author_id || null,
         group: postData.group_name || '',
+        group_url: postData.group_url || null,
         text: postData.content || '',
+        images: imagePaths,
+        videos: postData.video_links || [],
+        post_url: postData.post_url || null,
       });
     } else {
       const result = await db.upsertPost(postData);
@@ -608,8 +729,13 @@ class FacebookScraper {
         this.stats.newPosts.push({
           id: idUnico,
           author: postData.author_name,
+          author_id: postData.author_id || null,
           group: postData.group_name || '',
+          group_url: postData.group_url || null,
           text: postData.content || '',
+          images: imagePaths,
+          videos: postData.video_links || [],
+          post_url: postData.post_url || null,
         });
         logger.info(`  NUEVO: ${idUnico.substring(0, 18)}... - ${postData.author_name}`);
       } else if (result.action === 'updated') {
