@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const admin = require('firebase-admin');
 const logger = require('./logger');
+const config = require('./config');
 
 let db = null;
 
@@ -40,6 +41,8 @@ async function syncToFirebase(post) {
     ? `https://facebook.com/groups/${post.group_url}/posts/${post.post_url}`
     : (post.post_url || '');
 
+  const images = mapImagesToPublicUrls(Array.isArray(post.images) ? post.images : []);
+
   const now = new Date().toISOString();
 
   const payload = {
@@ -50,7 +53,7 @@ async function syncToFirebase(post) {
     group_name: post.group_name || '',
     group_url: post.group_url || '',
     content: post.content || '',
-    images: Array.isArray(post.images) ? post.images : [],
+    images,
     video_links: Array.isArray(post.video_links) ? post.video_links : [],
     tags: Array.isArray(post.tags) ? post.tags : [],
     post_url: postUrl,
@@ -71,6 +74,44 @@ async function syncToFirebase(post) {
   } catch (err) {
     logger.warn(`Error Firebase sync ${post.id_unico}: ${err.message}`);
   }
+}
+
+function mapImagesToPublicUrls(images) {
+  const baseUrl = String(config.scraping.imagePublicBaseUrl || '').replace(/\/+$/, '');
+  if (!baseUrl) return images;
+
+  const imageRoot = path.resolve(config.scraping.imageDir);
+  const imageRootName = path.basename(imageRoot);
+  const imageRootWithSep = `${imageRoot}${path.sep}`;
+
+  return images.map((img) => {
+    const value = String(img || '').trim();
+    if (!value) return value;
+    if (/^https?:\/\//i.test(value)) return value;
+
+    let normalized = path.normalize(value);
+    let absolutePath = path.isAbsolute(normalized)
+      ? normalized
+      : path.resolve(normalized);
+
+    // If the resolved path doesn't match the image root, try resolving
+    // relative paths that might be relative to imageDir itself
+    if (!absolutePath.startsWith(imageRootWithSep)) {
+      const imageDirName = path.basename(imageRoot);
+      const stripped = normalized.replace(new RegExp(`^${imageDirName}[/\\\\]`, 'i'), '');
+      if (stripped !== normalized) {
+        absolutePath = path.join(imageRoot, stripped);
+      }
+    }
+
+    // If it still doesn't match, return as-is (unconvertible)
+    if (!absolutePath.startsWith(imageRootWithSep)) {
+      return value;
+    }
+
+    const relativePath = path.relative(imageRoot, absolutePath).replace(/\\/g, '/');
+    return `${baseUrl}/${encodeURI(relativePath)}`;
+  });
 }
 
 module.exports = { syncToFirebase };

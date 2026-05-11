@@ -21,6 +21,13 @@ const {
 } = require('./helpers');
 const db = require('./db');
 
+let sharp = null;
+try {
+  sharp = require('sharp');
+} catch {
+  sharp = null;
+}
+
 class FacebookScraper {
   constructor(batchId) {
     this.batchId = batchId;
@@ -42,6 +49,8 @@ class FacebookScraper {
     this._postCountSinceDistraction = 0;
     this._seenStoryIds = new Set();
     this._rateLimitHits = 0;
+    this._thumbnailWarned = false;
+    this._compressionWarned = false;
   }
 
   async init() {
@@ -427,8 +436,8 @@ class FacebookScraper {
   _extractImagesFromBlob(blobStr, storyIdx) {
     const dedupMap = new Map(); // baseKey → { url, score }
 
-    const start = Math.max(0, storyIdx - 5000);
-    const end = Math.min(blobStr.length, storyIdx + 14000);
+    const start = Math.max(0, storyIdx - 12000);
+    const end = Math.min(blobStr.length, storyIdx + 70000);
     const nearby = blobStr.substring(start, end);
 
     const patterns = [
@@ -587,7 +596,9 @@ class FacebookScraper {
   }
 
   _isPostImageUrl(url) {
-    if (!/\.(jpg|jpeg|png|webp)(?:\?|$)/i.test(url)) return false;
+    const hasImageExt = /\.(jpg|jpeg|png|webp)(?:\?|$)/i.test(url);
+    const hasFbImageHints = /(?:[?&](?:stp|ext|_nc_cat|_nc_ht)=|dst-(?:jpe?g|png|webp)|format=(?:jpe?g|png|webp))/i.test(url);
+    if (!hasImageExt && !hasFbImageHints) return false;
     if (/(?:profile|avatar|emoji|sticker|reaction|static)/i.test(url)) return false;
     if (/_s(?:24|32|40|48|50|56|64|72|100|130)x(?:24|32|40|48|50|56|64|72|100|130)/i.test(url)) return false;
     return /scontent|fbcdn|safe_image/i.test(url);
@@ -757,9 +768,13 @@ class FacebookScraper {
    * Retorna array de paths locales.
    */
   async _downloadImages(groupOrId, urls) {
-    // Sanitizar nombre de carpeta: solo letras, números, espacios y guiones
+    // Sanitizar nombre de carpeta y evitar espacios en blanco
     const folderName = String(groupOrId || 'sin_grupo')
-      .replace(/[^a-zA-Z0-9áéíóúñÁÉÍÓÚÑ ]/g, '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, '_')
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .replace(/_+/g, '_')
       .trim()
       .substring(0, 50) || 'sin_grupo';
     const dir = path.join(config.scraping.imageDir, folderName);
@@ -774,12 +789,31 @@ class FacebookScraper {
         const url = urls[i];
         const ext = url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || 'jpg';
         const hash = crypto.createHash('sha1').update(url).digest('hex').substring(0, 16);
-        const filename = `${i + 1}-${hash}.${ext}`;
+        const filename = `${hash}.${ext}`;
         const filepath = path.join(dir, filename);
 
-        // Saltar si ya existe
+        // Smarter dedup: check if file with same hash already exists on disk
+        let existingPath = null;
         if (fs.existsSync(filepath)) {
-          localPaths.push(filepath);
+          existingPath = filepath;
+        } else {
+          const existingFiles = fs.readdirSync(dir).filter((f) => {
+            const lower = f.toLowerCase();
+            return lower.startsWith(`${hash}.`) && !lower.includes('_.');
+          });
+          if (existingFiles.length > 0) {
+            const candidate = path.join(dir, existingFiles[0]);
+            if (fs.existsSync(candidate)) {
+              existingPath = candidate;
+            }
+          }
+        }
+
+        if (existingPath) {
+          await this._compressImageIfNeeded(existingPath);
+          localPaths.push(existingPath);
+          await this._createThumbnail(existingPath);
+          logger.debug(`    Imagen ya existe: ${path.basename(existingPath)}`);
           continue;
         }
 
@@ -799,6 +833,8 @@ class FacebookScraper {
         }
 
         fs.writeFileSync(filepath, Buffer.from(resp.data));
+        await this._compressImageIfNeeded(filepath);
+        await this._createThumbnail(filepath);
         localPaths.push(filepath);
         logger.debug(`    Imagen descargada: ${folderName}/${filename} (${Math.round(resp.data.length / 1024)}KB)`);
       } catch (err) {
@@ -808,6 +844,128 @@ class FacebookScraper {
     }
 
     return localPaths;
+  }
+
+  async _createThumbnail(originalPath) {
+    if (!config.scraping.generateThumbnails) return;
+
+    const parsed = path.parse(originalPath);
+    const thumbPath = path.join(parsed.dir, `${parsed.name}_${parsed.ext}`);
+
+    if (fs.existsSync(thumbPath)) return;
+
+    if (!sharp) {
+      if (!this._thumbnailWarned) {
+        logger.warn('Sharp no está instalado; miniaturas deshabilitadas. Ejecuta: npm install sharp');
+        this._thumbnailWarned = true;
+      }
+      return;
+    }
+
+    try {
+      let quality = Math.max(35, Math.min(85, config.scraping.thumbnailQuality));
+      const maxThumbBytes = Math.max(40, config.scraping.thumbnailMaxSizeKb) * 1024;
+      const ext = parsed.ext.toLowerCase();
+      const tempPath = path.join(parsed.dir, `${parsed.name}_.tmp${parsed.ext}`);
+
+      for (let attempt = 0; attempt < 4; attempt++) {
+        let transformer = sharp(originalPath)
+          .rotate()
+          .resize({
+            width: config.scraping.thumbnailWidth,
+            height: config.scraping.thumbnailHeight,
+            fit: 'cover',
+            position: 'centre',
+            withoutEnlargement: false,
+          });
+
+        if (ext === '.png') {
+          transformer = transformer.png({ quality, compressionLevel: 9, palette: true });
+        } else if (ext === '.webp') {
+          transformer = transformer.webp({ quality });
+        } else {
+          transformer = transformer.jpeg({ quality, mozjpeg: true });
+        }
+
+        await transformer.toFile(tempPath);
+        const size = fs.statSync(tempPath).size;
+        if (size <= maxThumbBytes || quality <= 38) break;
+        quality -= 8;
+      }
+
+      if (fs.existsSync(tempPath)) {
+        fs.renameSync(tempPath, thumbPath);
+      }
+      logger.debug(`    Miniatura creada: ${path.basename(thumbPath)}`);
+    } catch (err) {
+      try {
+        const tempPath = path.join(parsed.dir, `${parsed.name}_.tmp${parsed.ext}`);
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      } catch { /* ignore */ }
+      logger.warn(`    No se pudo crear miniatura: ${err.message}`);
+    }
+  }
+
+  async _compressImageIfNeeded(imagePath) {
+    if (!config.scraping.compressImages) return;
+
+    let stat;
+    try {
+      stat = fs.statSync(imagePath);
+    } catch {
+      return;
+    }
+
+    const maxBytes = Math.max(100, config.scraping.maxImageSizeKb) * 1024;
+    if (stat.size <= maxBytes) return;
+
+    if (!sharp) {
+      if (!this._compressionWarned) {
+        logger.warn('Sharp no está instalado; compresión deshabilitada. Ejecuta: npm install sharp');
+        this._compressionWarned = true;
+      }
+      return;
+    }
+
+    const parsed = path.parse(imagePath);
+    const ext = parsed.ext.toLowerCase();
+    const tempPath = path.join(parsed.dir, `${parsed.name}.tmp${parsed.ext}`);
+
+    try {
+      let quality = Math.max(60, Math.min(90, config.scraping.imageCompressionQuality));
+      let transformer;
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        transformer = sharp(imagePath).rotate();
+        if (ext === '.png') {
+          transformer = transformer.png({ quality, compressionLevel: 9, palette: true });
+        } else if (ext === '.webp') {
+          transformer = transformer.webp({ quality });
+        } else {
+          transformer = transformer.jpeg({ quality, mozjpeg: true });
+        }
+
+        await transformer.toFile(tempPath);
+        const newSize = fs.statSync(tempPath).size;
+        if (newSize <= maxBytes || quality <= 62) {
+          break;
+        }
+        quality -= 8;
+      }
+
+      const finalSize = fs.statSync(tempPath).size;
+      if (finalSize < stat.size) {
+        fs.renameSync(tempPath, imagePath);
+        logger.debug(`    Imagen comprimida: ${path.basename(imagePath)} (${Math.round(stat.size / 1024)}KB -> ${Math.round(finalSize / 1024)}KB)`);
+      } else {
+        fs.unlinkSync(tempPath);
+      }
+    } catch (err) {
+      try {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      } catch { /* ignore */ }
+      logger.warn(`    No se pudo comprimir imagen: ${err.message}`);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════

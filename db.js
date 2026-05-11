@@ -2,6 +2,10 @@ const mysql = require('mysql2/promise');
 const config = require('./config');
 const logger = require('./logger');
 
+// Evita que mysql2 intente WebAssembly (falla en Hostinger desde cron)
+process.env.MYSQL2_USE_NATIVE_AUTH = '1';
+process.env.MYSQL2_DISABLE_WASM = '1';
+
 let pool = null;
 
 async function getPool() {
@@ -28,6 +32,8 @@ async function initTables() {
         content_hash VARCHAR(64),
         images JSON,
         video_links JSON,
+        tags JSON,
+        post_url VARCHAR(255),
         scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_unico (id_unico),
@@ -35,6 +41,12 @@ async function initTables() {
         INDEX idx_group (group_name),
         INDEX idx_scraped (scraped_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+
+    await conn.execute(`
+      ALTER TABLE fb_posts
+      ADD COLUMN IF NOT EXISTS tags JSON,
+      ADD COLUMN IF NOT EXISTS post_url VARCHAR(255)
     `);
 
     await conn.execute(`
@@ -141,12 +153,14 @@ async function upsertPost(postData) {
   }
 
   const [existing] = await p.execute(
-    'SELECT id_unico, content_hash, images, video_links FROM fb_posts WHERE id_unico = ?',
+    'SELECT id_unico, content_hash, images, video_links, tags, post_url FROM fb_posts WHERE id_unico = ?',
     [postData.id_unico]
   );
 
   const nextImagesJson = postData.images ? JSON.stringify(postData.images) : null;
   const nextVideosJson = postData.video_links ? JSON.stringify(postData.video_links) : null;
+  const nextTagsJson = postData.tags ? JSON.stringify(postData.tags) : null;
+  const nextPostUrl = postData.post_url || null;
 
   if (existing.length === 0) {
     await p.execute(
@@ -154,8 +168,8 @@ async function upsertPost(postData) {
         (id_unico, author_name, author_id,
          group_name, group_url,
          content, content_hash,
-         images, video_links)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         images, video_links, tags, post_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         postData.id_unico,
         postData.author_name,
@@ -166,6 +180,8 @@ async function upsertPost(postData) {
         postData.content_hash || null,
         nextImagesJson,
         nextVideosJson,
+        nextTagsJson,
+        nextPostUrl,
       ]
     );
     return { action: 'inserted' };
@@ -173,16 +189,19 @@ async function upsertPost(postData) {
 
   const existingImagesJson = normalizeJsonColumn(existing[0].images);
   const existingVideosJson = normalizeJsonColumn(existing[0].video_links);
+  const existingTagsJson = normalizeJsonColumn(existing[0].tags);
+  const tagsChanged = existingTagsJson !== normalizeJsonColumn(nextTagsJson);
+  const postUrlChanged = (existing[0].post_url || null) !== nextPostUrl;
   const mediaChanged = existingImagesJson !== normalizeJsonColumn(nextImagesJson) ||
     existingVideosJson !== normalizeJsonColumn(nextVideosJson);
 
-  if (existing[0].content_hash !== postData.content_hash || mediaChanged) {
+  if (existing[0].content_hash !== postData.content_hash || mediaChanged || tagsChanged || postUrlChanged) {
     await p.execute(
       `UPDATE fb_posts SET
         author_name = ?, author_id = ?,
         group_name = ?, group_url = ?,
         content = ?, content_hash = ?,
-        images = ?, video_links = ?,
+        images = ?, video_links = ?, tags = ?, post_url = ?,
         updated_at = NOW()
        WHERE id_unico = ?`,
       [
@@ -194,6 +213,8 @@ async function upsertPost(postData) {
         postData.content_hash || null,
         nextImagesJson,
         nextVideosJson,
+        nextTagsJson,
+        nextPostUrl,
         postData.id_unico,
       ]
     );

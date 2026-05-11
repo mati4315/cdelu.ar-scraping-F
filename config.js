@@ -60,6 +60,15 @@ module.exports = {
     maxPages: parseInt(process.env.MAX_PAGES, 10) || 5,
     downloadImages: process.env.DOWNLOAD_IMAGES === 'true',
     imageDir: process.env.IMAGE_DIR || './images',
+    imagePublicBaseUrl: process.env.IMAGE_PUBLIC_BASE_URL || '',
+    generateThumbnails: process.env.GENERATE_THUMBNAILS !== 'false',
+    thumbnailWidth: parseInt(process.env.THUMBNAIL_WIDTH, 10) || 500,
+    thumbnailHeight: parseInt(process.env.THUMBNAIL_HEIGHT, 10) || 281,
+    thumbnailQuality: parseInt(process.env.THUMBNAIL_QUALITY, 10) || 58,
+    thumbnailMaxSizeKb: parseInt(process.env.THUMBNAIL_MAX_SIZE_KB, 10) || 90,
+    compressImages: process.env.COMPRESS_IMAGES !== 'false',
+    maxImageSizeKb: parseInt(process.env.MAX_IMAGE_SIZE_KB, 10) || 500,
+    imageCompressionQuality: parseInt(process.env.IMAGE_COMPRESSION_QUALITY, 10) || 82,
   },
 
   // ─── Human Behavior Simulation ──────────────────────────────

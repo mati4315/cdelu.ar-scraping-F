@@ -1,5 +1,9 @@
 require('dotenv').config();
 
+// Evita WebAssembly out-of-memory en Hostinger (mysql2 caching_sha2_password)
+process.env.MYSQL2_USE_NATIVE_AUTH = '1';
+process.env.MYSQL2_DISABLE_WASM = '1';
+
 // ── Modo servidor HTTP (Passenger / Hostinger Node.js App) ──────
 // Si existe la variable PORT, Passenger está corriendo este archivo
 // como una web app. En ese caso cargamos server.js en su lugar.
