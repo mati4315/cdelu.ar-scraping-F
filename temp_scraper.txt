@@ -1,0 +1,100 @@
+﻿    normal.sort((a, b) => b.length - a.length);
+
+    return priority.concat(normal).slice(0, 4);
+  }
+
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // PROCESS POST & SAVE
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+  async _processPostData(post) {
+    if (!post.text && (!post.images || post.images.length === 0) && (!post.videos || post.videos.length === 0)) {
+      this.stats.postsSkipped++;
+      return;
+    }
+
+    this._lastContent = post.text;
+
+    // Descargar imÃ¡genes si estÃ¡ activado
+    let imagePaths = post.images || [];
+    if (config.scraping.downloadImages && imagePaths.length > 0) {
+      imagePaths = await this._downloadImages(post.group_name || post.story_id, imagePaths);
+    }
+
+    logger.debug(`  Medios detectados: ${imagePaths.length} imagen(es), ${(post.videos || []).length} video(s).`);
+
+    // id_unico: author_id + mes + semana_mes + primeros_20_chars_limpios_del_contenido
+    const cleanText = (post.text || '')
+      .replace(/\s+/g, '')
+      .replace(/[^a-zA-Z0-9Ã¡Ã©Ã­Ã³ÃºÃ±ÃÃ‰ÃÃ“ÃšÃ‘]/g, '')
+      .substring(0, 20);
+    const uidAuthor = post.author_id || '0';
+    const tsDate = post.post_timestamp ? new Date(post.post_timestamp) : new Date();
+    const month = tsDate.getUTCMonth() + 1;
+    const weekOfMonth = Math.ceil(tsDate.getUTCDate() / 7);
+    const idUnico = `${uidAuthor}${month}${weekOfMonth}${cleanText}`;
+
+    const postData = {
+      id_unico: idUnico,
+      author_name: post.author_name,
+      author_id: post.author_id || null,
+      group_name: post.group_name,
+      group_url: post.group_url,
+      content: post.text,
+      content_hash: crypto.createHash('sha256').update(JSON.stringify({
+        text: post.text || '',
+        images: imagePaths,
+        videos: post.videos || [],
+        timestamp: post.post_timestamp || null,
+      })).digest('hex'),
+      images: imagePaths,
+      video_links: post.videos || [],
+      tags: this._extractTags(post.text),
+      post_url: (() => {
+        if (post.post_id) return post.post_id;
+        const link = post.post_link || '';
+        const m = link.match(/\/(?:posts|permalink|videos|reel|photo\.php\?fbid=|story\.php\?story_fbid=)(\d+)/);
+        return m ? m[1] : null;
+      })(),
+    };
+
+    if (config.dryRun) {
+      const groupLabel = postData.group_name ? `[${postData.group_name}] ` : '';
+      logger.info(`  [DRY RUN] Post ${idUnico.substring(0, 18)}... ${groupLabel}por ${postData.author_name}: "${postData.content.substring(0, 80)}..."`);
+      this.stats.postsNew++;
+      this.stats.newPosts.push({
+        id: idUnico,
+        author: postData.author_name,
+        author_id: postData.author_id || null,
+        group: postData.group_name || '',
+        group_url: postData.group_url || null,
+        text: postData.content || '',
+        images: imagePaths,
+        videos: postData.video_links || [],
+        tags: postData.tags || [],
+        post_url: postData.post_url || null,
+      });
+    } else {
+      const result = await db.upsertPost(postData);
+      if (result.action === 'inserted') {
+        this.stats.postsNew++;
+        this.stats.newPosts.push({
+          id: idUnico,
+          author: postData.author_name,
+          author_id: postData.author_id || null,
+          group: postData.group_name || '',
+          group_url: postData.group_url || null,
+          text: postData.content || '',
+          images: imagePaths,
+          videos: postData.video_links || [],
+          tags: postData.tags || [],
+          post_url: postData.post_url || null,
+        });
+        logger.info(`  NUEVO: ${idUnico.substring(0, 18)}... - ${postData.author_name}`);
+      } else if (result.action === 'updated') {
+        this.stats.postsUpdated++;
+        logger.info(`  ACTUALIZADO: ${idUnico.substring(0, 18)}... - ${postData.author_name}`);
+      } else {
+        this.stats.postsSkipped++;
+        logger.debug(`  SKIP: ${idUnico.substring(0, 18)}... sin cambios.`);
+      }
