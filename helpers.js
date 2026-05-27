@@ -117,7 +117,7 @@ function triggerCooldown(reason) {
   }));
 
   const minutes = Math.round(actualCooldown / 60000);
-  logger.crit(`Circuit breaker activado: ${reason}. Cooldown: ${minutes} min. Fallos: ${consecutiveFailures + 1}`);
+  logger.error(`Circuit breaker activado: ${reason}. Cooldown: ${minutes} min. Fallos: ${consecutiveFailures + 1}`);
 }
 
 function resetCooldown() {
@@ -153,7 +153,7 @@ function saveSessionState(state) {
 function loadCookies() {
   const file = config.fb.cookiesFile;
   if (!fs.existsSync(file)) {
-    logger.crit(`No se encontró ${file}. Coloca tus cookies de FB allí.`);
+    logger.error(`No se encontró ${file}. Coloca tus cookies de FB allí.`);
     return null;
   }
   try {
@@ -161,7 +161,7 @@ function loadCookies() {
     const cookies = JSON.parse(raw);
     return cookies;
   } catch (err) {
-    logger.crit(`Error parseando cookies: ${err.message}`);
+    logger.error(`Error parseando cookies: ${err.message}`);
     return null;
   }
 }

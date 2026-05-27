@@ -397,7 +397,7 @@ class FacebookScraper {
         // Construir el post si tiene datos suficientes
         if (authorName || text) {
           // Extraer medios y metadata asociada a este story dentro del SSR cercano.
-          const images = this._extractImagesFromBlob(blobStr, storyIdx);
+          const images = this._extractImagesFromBlob(blobStr, storyIdx, authorPic);
           const videos = this._extractVideosFromBlob(blobStr, storyIdx);
           const postLink = this._extractPostLinkFromBlob(blobStr, storyIdx);
           const postId = this._extractPostIdFromBlob(blobStr, storyIdx);
@@ -433,8 +433,9 @@ class FacebookScraper {
    * Extrae URLs de imagenes del blob JSON cerca de un story.
    * Deduplica por imagen base (misma imagen en distintas resoluciones se agrupan).
    */
-  _extractImagesFromBlob(blobStr, storyIdx) {
+  _extractImagesFromBlob(blobStr, storyIdx, authorPicUrl = null) {
     const dedupMap = new Map(); // baseKey → { url, score }
+    const normalizedAuthorPic = authorPicUrl ? this._getImageDedupKey(authorPicUrl) : null;
 
     const start = Math.max(0, storyIdx - 12000);
     const end = Math.min(blobStr.length, storyIdx + 70000);
@@ -454,6 +455,10 @@ class FacebookScraper {
         if (!this._isPostImageUrl(url)) continue;
 
         const key = this._getImageDedupKey(url);
+        
+        // Ignorar si la imagen base coincide con el avatar del autor
+        if (normalizedAuthorPic && key === normalizedAuthorPic) continue;
+
         const score = this._imageScore(url);
         // Quedarse con la mejor resolucion para cada imagen base
         if (!dedupMap.has(key) || score > dedupMap.get(key).score) {
@@ -600,7 +605,18 @@ class FacebookScraper {
     const hasFbImageHints = /(?:[?&](?:stp|ext|_nc_cat|_nc_ht)=|dst-(?:jpe?g|png|webp)|format=(?:jpe?g|png|webp))/i.test(url);
     if (!hasImageExt && !hasFbImageHints) return false;
     if (/(?:profile|avatar|emoji|sticker|reaction|static)/i.test(url)) return false;
-    if (/_s(?:24|32|40|48|50|56|64|72|100|130)x(?:24|32|40|48|50|56|64|72|100|130)/i.test(url)) return false;
+    // Extraer dimensiones de la URL (ej: /p160x160/ o _160x160_)
+    const dimMatch = url.match(/(?:\/|_)[ps]?(\d{2,4})x(\d{2,4})(?:\/|_|\.)/i);
+    if (dimMatch) {
+      const w = parseInt(dimMatch[1], 10);
+      const h = parseInt(dimMatch[2], 10);
+      // Bloquear cualquier imagen que sea inferior a 250x250 (usualmente iconos o avatares)
+      if (w < 250 && h < 250) return false;
+      
+      // Ignorar imágenes "banner" o "cover" (típicas portadas de grupos o perfiles)
+      // Tienen un ancho muy grande (>= 800) y una altura mucho menor (ratio > 2.5)
+      if (w >= 800 && (w / h) > 2.2) return false;
+    }
     return /scontent|fbcdn|safe_image/i.test(url);
   }
 
