@@ -26,7 +26,10 @@ const {
   saveSessionState,
   sendTelegramAlert,
   sendTelegramPhoto,
+  sendTelegramToChat,
   sendMediaGroup,
+  broadcastPost,
+  broadcastMessage,
   cleanup,
 } = require('./helpers');
 const FacebookScraper = require('./scraper');
@@ -123,36 +126,15 @@ async function main() {
       `Modo: ${config.dryRun ? 'DRY RUN' : 'Producción'}`;
 
     await sendTelegramAlert(telegramMsg);
+    // Mandar resumen tambien al canal si es diferente
+    if (config.telegram.channelId && config.telegram.channelId !== config.telegram.chatId) {
+      await sendTelegramToChat(config.telegram.channelId, telegramMsg);
+    }
 
-    // 11. Enviar contenido de cada post nuevo por Telegram
+    // 11. Enviar contenido de cada post nuevo por Telegram (a todos los destinos)
     if (stats.newPosts && stats.newPosts.length > 0) {
       for (const post of stats.newPosts) {
-        // Texto, truncado a ~1000 chars
-        let text = post.text || '';
-        if (text.length > 1000) text = text.substring(0, 997) + '...';
-
-        const authorLink = post.author_id
-          ? `<a href="https://fb.com/${post.author_id}"><b>${post.author}</b></a>`
-          : `<b>${post.author}</b>`;
-
-        const publicLink = (post.group_url && post.post_url)
-          ? `\n\n<a href="https://fb.com/groups/${post.group_url}/posts/${post.post_url}"><b>Link a la publicacion</b></a>`
-          : '';
-
-        const videoLinks = (post.videos || []).slice(0, 3)
-          .map((url, idx) => `\n<a href="${url}"><b>Video ${idx + 1}</b></a>`)
-          .join('');
-
-        const postMsg =
-          (text ? `${authorLink}\n\n${text}${publicLink}${videoLinks}` : `${authorLink}${publicLink}${videoLinks}`);
-
-        // Si hay imagenes, se envian todas juntas en un media group
-        if (post.images && post.images.length > 0) {
-          await sendMediaGroup(post.images, postMsg);
-        } else {
-          // Sin imagenes, solo texto
-          await sendTelegramAlert(postMsg);
-        }
+        await broadcastPost(post);
         // Pequena pausa entre mensajes para no saturar la API
         await new Promise(r => setTimeout(r, 500));
       }
@@ -228,7 +210,7 @@ process.on('SIGTERM', () => {
 });
 
 process.on('unhandledRejection', (reason) => {
-  logger.error(`Unhandled Rejection: ${reason}`);
+  logger.error(`Unhandled Rejection: ${reason && reason.stack ? reason.stack : reason}`);
 });
 
 main();

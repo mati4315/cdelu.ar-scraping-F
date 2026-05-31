@@ -290,58 +290,92 @@ function isValidContent(content) {
 // TELEGRAM ALERTS
 // ═══════════════════════════════════════════════════════════════
 
-async function sendTelegramAlert(message) {
-  const { botToken, chatId } = config.telegram;
+/**
+ * Envia un mensaje a un chat específico de Telegram.
+ * @param {string|number} chatId - ID del chat
+ * @param {string} message - Texto del mensaje
+ * @param {object} [options] - Opciones adicionales
+ * @param {number} [options.topicId] - message_thread_id para topics en foros
+ */
+async function sendTelegramToChat(chatId, message, options = {}) {
+  const { botToken } = config.telegram;
   if (!botToken || !chatId) {
-    logger.debug('Telegram no configurado. Saltando alerta.');
+    logger.debug('Telegram no configurado. Saltando mensaje.');
     return;
   }
   try {
     const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-    await axios.post(url, {
+    const payload = {
       chat_id: chatId,
       text: message,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
-    }, { timeout: 10000 });
-    logger.debug('Alerta enviada por Telegram.');
+    };
+    if (options.topicId) payload.message_thread_id = options.topicId;
+    await axios.post(url, payload, { timeout: 10000 });
+    logger.debug(`Mensaje enviado a chat ${chatId}.`);
   } catch (err) {
-    logger.error(`Error enviando alerta Telegram: ${err.message}`);
+    logger.error(`Error enviando mensaje a ${chatId}: ${err.message}`);
+  }
+}
+
+/**
+ * Envia un mensaje a todos los chats de alerta (logs internos).
+ */
+async function sendTelegramAlert(message) {
+  const chatIds = config.telegramDestinations.alertChatIds;
+  for (const chatId of chatIds) {
+    // alertas siempre sin topic
+    await sendTelegramToChat(typeof chatId === 'object' ? chatId.chatId : chatId, message);
   }
 }
 
 /**
  * Envia una foto por Telegram. Soporta URLs remotas o paths locales.
  */
-async function sendTelegramPhoto(photo, caption) {
-  const { botToken, chatId } = config.telegram;
-  if (!botToken || !chatId) {
-    logger.debug('Telegram no configurado. Saltando foto.');
-    return;
-  }
+/**
+ * Envia una foto a un chat específico.
+ * @param {string|number} chatId - ID del chat
+ * @param {string} photo - URL o path local de la foto
+ * @param {string} [caption] - Pie de foto
+ * @param {object} [options] - Opciones adicionales
+ * @param {number} [options.topicId] - message_thread_id para topics en foros
+ */
+async function sendTelegramPhotoToChat(chatId, photo, caption, options = {}) {
+  const { botToken } = config.telegram;
+  if (!botToken || !chatId) return;
   try {
     if (typeof photo === 'string' && (photo.startsWith('http://') || photo.startsWith('https://'))) {
-      // URL remota: Telegram la descarga
-      await axios.post(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+      const payload = {
         chat_id: chatId,
         photo: photo,
         caption: caption || undefined,
         parse_mode: caption ? 'HTML' : undefined,
-      }, { timeout: 15000 });
+      };
+      if (options.topicId) payload.message_thread_id = options.topicId;
+      await axios.post(`https://api.telegram.org/bot${botToken}/sendPhoto`, payload, { timeout: 15000 });
     } else if (typeof photo === 'string' && fs.existsSync(photo)) {
-      // Archivo local: upload multipart manual (sin dependencias extra)
-      await uploadLocalPhoto(botToken, chatId, photo, caption);
+      await uploadLocalPhoto(botToken, chatId, photo, caption, options);
     } else {
       logger.debug(`Foto no encontrada o formato invalido: ${photo}`);
       return;
     }
-    logger.debug('Foto enviada por Telegram.');
+    logger.debug(`Foto enviada a chat ${chatId}.`);
   } catch (err) {
-    logger.warn(`Error enviando foto Telegram: ${err.message}`);
+    logger.warn(`Error enviando foto a ${chatId}: ${err.message}`);
   }
 }
 
-function uploadLocalPhoto(botToken, chatId, filePath, caption) {
+/**
+ * Envia una foto al chat principal (legacy).
+ */
+async function sendTelegramPhoto(photo, caption) {
+  const { chatId } = config.telegram;
+  if (!chatId) return;
+  await sendTelegramPhotoToChat(chatId, photo, caption);
+}
+
+function uploadLocalPhoto(botToken, chatId, filePath, caption, options = {}) {
   return new Promise((resolve, reject) => {
     const https = require('https');
     const fileBuffer = fs.readFileSync(filePath);
@@ -357,6 +391,9 @@ function uploadLocalPhoto(botToken, chatId, filePath, caption) {
     if (caption) {
       parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`));
       parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nHTML\r\n`));
+    }
+    if (options.topicId) {
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="message_thread_id"\r\n\r\n${options.topicId}\r\n`));
     }
     parts.push(Buffer.from(`--${boundary}--\r\n`));
     
@@ -386,41 +423,57 @@ function uploadLocalPhoto(botToken, chatId, filePath, caption) {
  * Soporta URLs remotas y archivos locales.
  * Solo el primer elemento lleva caption (limite de Telegram).
  */
-async function sendMediaGroup(photos, caption) {
-  const { botToken, chatId } = config.telegram;
-  if (!botToken || !chatId) {
-    logger.debug('Telegram no configurado. Saltando media group.');
-    return;
-  }
+/**
+ * Envia un group de fotos a un chat específico.
+ * @param {string|number} chatId - ID del chat
+ * @param {string[]} photos - URLs o paths locales
+ * @param {string} [caption] - Pie del primer elemento
+ * @param {object} [options] - Opciones adicionales
+ * @param {number} [options.topicId] - message_thread_id para topics en foros
+ */
+async function sendMediaGroupToChat(chatId, photos, caption, options = {}) {
+  const { botToken } = config.telegram;
+  if (!botToken || !chatId) return;
   if (!photos || photos.length === 0) return;
   if (photos.length === 1) {
-    return sendTelegramPhoto(photos[0], caption);
+    return sendTelegramPhotoToChat(chatId, photos[0], caption, options);
   }
 
   const isRemote = typeof photos[0] === 'string' && (photos[0].startsWith('http://') || photos[0].startsWith('https://'));
 
   if (isRemote) {
     try {
-      await axios.post(`https://api.telegram.org/bot${botToken}/sendMediaGroup`, {
+      const payload = {
         chat_id: chatId,
         media: photos.map((url, i) => ({
           type: 'photo',
           media: url,
           ...(i === 0 && caption ? { caption, parse_mode: 'HTML' } : {}),
         })),
-      }, { timeout: 30000 });
-      logger.debug('Media group enviado por Telegram.');
+      };
+      if (options.topicId) payload.message_thread_id = options.topicId;
+      await axios.post(`https://api.telegram.org/bot${botToken}/sendMediaGroup`, payload, { timeout: 30000 });
+      logger.debug(`Media group enviado a chat ${chatId}.`);
     } catch (err) {
-      logger.warn(`Error enviando media group: ${err.message}`);
+      logger.warn(`Error enviando media group a ${chatId}: ${err.message}`);
     }
   } else {
     try {
-      await uploadLocalMediaGroup(botToken, chatId, photos, caption);
-      logger.debug('Media group local enviado por Telegram.');
+      await uploadLocalMediaGroup(botToken, chatId, photos, caption, options);
+      logger.debug(`Media group local enviado a chat ${chatId}.`);
     } catch (err) {
-      logger.warn(`Error enviando media group local: ${err.message}`);
+      logger.warn(`Error enviando media group local a ${chatId}: ${err.message}`);
     }
   }
+}
+
+/**
+ * Envia un media group al chat principal (legacy).
+ */
+async function sendMediaGroup(photos, caption) {
+  const { chatId } = config.telegram;
+  if (!chatId) return;
+  await sendMediaGroupToChat(chatId, photos, caption);
 }
 
 function uploadLocalMediaGroup(botToken, chatId, filePaths, caption) {
@@ -470,6 +523,65 @@ function uploadLocalMediaGroup(botToken, chatId, filePaths, caption) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// BROADCAST - Envia a todos los destinos configurados
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Envia un post (texto + imágenes) a todos los destinos configurados.
+ * Soporta destinos con topicId para foros de Telegram.
+ */
+async function broadcastPost(post) {
+  const chatIds = config.telegramDestinations.postChatIds;
+  if (!chatIds || chatIds.length === 0) return;
+
+  let text = post.text || '';
+  if (text.length > 1000) text = text.substring(0, 997) + '...';
+
+  const authorLink = post.author_id
+    ? `<a href="https://fb.com/${post.author_id}"><b>${post.author}</b></a>`
+    : `<b>${post.author}</b>`;
+
+  const publicLink = (post.group_url && post.post_url)
+    ? `\n\n<a href="https://fb.com/groups/${post.group_url}/posts/${post.post_url}"><b>Link a la publicacion</b></a>`
+    : '';
+
+  const videoLinks = (post.videos || []).slice(0, 3)
+    .map((url, idx) => `\n<a href="${url}"><b>Video ${idx + 1}</b></a>`)
+    .join('');
+
+  const postMsg = text
+    ? `${authorLink}\n\n${text}${publicLink}${videoLinks}`
+    : `${authorLink}${publicLink}${videoLinks}`;
+
+  for (const dest of chatIds) {
+    const chatId = typeof dest === 'object' ? dest.chatId : dest;
+    const options = typeof dest === 'object' ? { topicId: dest.topicId } : {};
+    try {
+      if (post.images && post.images.length > 0) {
+        await sendMediaGroupToChat(chatId, post.images, postMsg, options);
+      } else {
+        await sendTelegramToChat(chatId, postMsg, options);
+      }
+    } catch (err) {
+      logger.warn(`Error enviando post a chat ${chatId}: ${err.message}`);
+    }
+  }
+}
+
+/**
+ * Envia un mensaje de texto a todos los chats de posts.
+ */
+async function broadcastMessage(message) {
+  if (!message) return;
+  const chatIds = config.telegramDestinations.postChatIds;
+  for (const dest of chatIds) {
+    const chatId = typeof dest === 'object' ? dest.chatId : dest;
+    const options = typeof dest === 'object' ? { topicId: dest.topicId } : {};
+    await sendTelegramToChat(chatId, message, options);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // CLEANUP
 // ═══════════════════════════════════════════════════════════════
 
@@ -504,6 +616,11 @@ module.exports = {
   isValidContent,
   sendTelegramAlert,
   sendTelegramPhoto,
+  sendTelegramToChat,
+  sendTelegramPhotoToChat,
   sendMediaGroup,
+  sendMediaGroupToChat,
+  broadcastPost,
+  broadcastMessage,
   cleanup,
 };

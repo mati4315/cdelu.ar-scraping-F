@@ -228,13 +228,13 @@ class FacebookScraper {
 
   _extractPostsFromSSR(html) {
     const blobs = [];
-    const pattern = /<script type="application\/json"[^>]*data-sjs[^>]*>([\s\S]*?)<\/script>/g;
+    const pattern = /<script type="application\/json"[^>]*>([\s\S]*?)<\/script>/g;
     let match;
     while ((match = pattern.exec(html)) !== null) {
       try {
         const content = match[1];
-        // Solo procesar blobs que contengan datos de feed
-        if (content.includes('story_bucket') && content.includes('"message":')) {
+        // Solo procesar blobs que contengan datos de feed (comet_sections, story_bucket, o message)
+        if (content.includes('story_bucket') || content.includes('comet_sections')) {
           blobs.push(content);
         }
       } catch { /* skip */ }
@@ -275,8 +275,8 @@ class FacebookScraper {
   _parseStoriesFromBlob(blobStr) {
     const stories = [];
 
-    // Encontrar todos los IDs de story (formato Uzpf...)
-    const storyIdPattern = /"id":"(Uzpf[A-Za-z0-9_=-]{30,})"/g;
+    // Encontrar todos los IDs de story (formato Uzpf... o S:_I...)
+    const storyIdPattern = /"id":"(Uzpf[A-Za-z0-9_=-]{10,}|S:_I[A-Za-z0-9_=-]{10,})"/g;
     const storyIds = new Set();
     let idMatch;
     while ((idMatch = storyIdPattern.exec(blobStr)) !== null) {
@@ -1061,18 +1061,16 @@ class FacebookScraper {
   }
 
   _extractNextPageUrl(html, currentUrl) {
-    // Buscar cursor de paginación en el SSR JSON (no en CSS colores)
-    // El cursor real tiene un formato largo (base64 o similar)
-    const pattern = /<script type="application\/json"[^>]*data-sjs[^>]*>([\s\S]*?)<\/script>/g;
+    // Buscar cursor de paginación en el SSR JSON
+    const pattern = /<script type="application\/json"[^>]*>([\s\S]*?)<\/script>/g;
     let match;
     while ((match = pattern.exec(html)) !== null) {
       const content = match[1];
-      // Buscar cursor en estructura Relay de paginación (tiene formato de hash largo)
-      const cursorRegex = /"cursor":"([A-Za-z0-9_\-=]{50,})"/g;
+      // Buscar cursor en estructura Relay de paginación
+      const cursorRegex = /"cursor":"([A-Za-z0-9_\-=]{40,})"/g;
       let cm;
       while ((cm = cursorRegex.exec(content)) !== null) {
         const cursor = cm[1];
-        // Usar la URL actual del feed como base, no homeUrl fijo
         const baseUrl = currentUrl.split('?')[0];
         const sep = '?';
         return `${baseUrl}${sep}cursor=${encodeURIComponent(cursor)}`;

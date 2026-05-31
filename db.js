@@ -40,8 +40,8 @@ async function initTables() {
         INDEX idx_author (author_name),
         INDEX idx_group (group_name),
         INDEX idx_scraped (scraped_at)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+    );
 
     await conn.execute(`
       ALTER TABLE fb_posts
@@ -65,8 +65,8 @@ async function initTables() {
         summary TEXT,
         INDEX idx_batch (batch_id),
         INDEX idx_status (status)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+    );
 
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS scrape_errors (
@@ -79,8 +79,8 @@ async function initTables() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_batch (batch_id),
         INDEX idx_type (error_type)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+    );
 
     logger.info('Tablas inicializadas correctamente.');
   } finally {

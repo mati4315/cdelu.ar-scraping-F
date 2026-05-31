@@ -145,6 +145,51 @@ module.exports = {
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN || '',
     chatId: process.env.TELEGRAM_CHAT_ID || '',
+    // Destinos adicionales a donde replicar los posts (separados por coma)
+    extraChatIds: process.env.TELEGRAM_EXTRA_CHAT_IDS
+      ? process.env.TELEGRAM_EXTRA_CHAT_IDS.split(',').map(s => s.trim()).filter(Boolean)
+      : [],
+    // Alias para compatibilidad hacia atras
+    channelId: process.env.TELEGRAM_CHANNEL_ID || '',
+    // Message thread ID para grupos con topics/foros
+    topicId: process.env.TELEGRAM_TOPIC_ID || '',
+  },
+  // ─── Telegram Destinations ──────────────────────────────────
+  telegramDestinations: {
+    // Lista completa de chats a donde mandar los posts
+    // Cada entrada puede ser un string (chatId plano) o { chatId, topicId }
+    get postChatIds() {
+      const ids = [];
+      const topicId = module.exports.telegram.topicId;
+      const channelId = module.exports.telegram.channelId;
+
+      // Chat privado: siempre sin topic
+      if (module.exports.telegram.chatId) ids.push(module.exports.telegram.chatId);
+
+      // Canal/supergrupo: con topic si está configurado
+      if (channelId) {
+        if (topicId) {
+          ids.push({ chatId: channelId, topicId });
+        } else {
+          ids.push(channelId);
+        }
+      }
+
+      // Extra chats: sin topic por defecto
+      module.exports.telegram.extraChatIds.forEach(id => {
+        if (!ids.some(e => (typeof e === 'object' ? e.chatId : e) === id)) {
+          ids.push(id);
+        }
+      });
+
+      return ids;
+    },
+    // Solo el chat principal (para alertas internas) - siempre sin topic
+    get alertChatIds() {
+      const ids = [];
+      if (module.exports.telegram.chatId) ids.push(module.exports.telegram.chatId);
+      return ids;
+    },
   },
 
   // ─── Dry Run ───────────────────────────────────────────────
