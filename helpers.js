@@ -410,7 +410,13 @@ function uploadLocalPhoto(botToken, chatId, filePath, caption, options = {}) {
     }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve());
+      res.on('end', () => {
+        if (res.statusCode >= 400) {
+          reject(new Error(`Telegram API Error: ${res.statusCode} - ${data}`));
+        } else {
+          resolve();
+        }
+      });
     });
     req.on('error', reject);
     req.write(body);
