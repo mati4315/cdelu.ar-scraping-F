@@ -41,19 +41,54 @@ async function syncToFirebase(post) {
     ? `https://facebook.com/groups/${post.group_url}/posts/${post.post_url}`
     : (post.post_url || '');
 
-  const images = mapImagesToPublicUrls(Array.isArray(post.images) ? post.images : []);
+  const imagesV2Source = Array.isArray(post.imagesV2) ? post.imagesV2 : [];
+  const normalizedImagesV2 = imagesV2Source
+    .map((entry) => {
+      if (typeof entry === 'string') {
+        const url = mapImagesToPublicUrls([entry])[0] || '';
+        return url ? { url, thumbUrl: deriveThumbnailPublicUrl(url) } : null;
+      }
+      if (!entry || typeof entry !== 'object') return null;
+
+      const url = mapImagesToPublicUrls([entry.url])[0] || '';
+      if (!url) return null;
+      const thumbUrl =
+        mapImagesToPublicUrls([entry.thumbUrl || entry.thumbnailUrl || entry.thumbnail || entry.imgMiniatura || entry.img_miniatura])[0] ||
+        deriveThumbnailPublicUrl(url);
+      return {
+        url,
+        thumbUrl: thumbUrl || deriveThumbnailPublicUrl(url)
+      };
+    })
+    .filter(Boolean);
+
+  const images = normalizedImagesV2.length > 0
+    ? normalizedImagesV2.map((entry) => entry.url)
+    : mapImagesToPublicUrls(Array.isArray(post.images) ? post.images : []);
+
+  const imagesV2 = normalizedImagesV2.length > 0
+    ? normalizedImagesV2
+    : images.map((url, index) => ({
+        url,
+        thumbUrl: index === 0 ? deriveThumbnailPublicUrl(url) : deriveThumbnailPublicUrl(url)
+      }));
+
+  const imgMiniatura = imagesV2[0]?.thumbUrl || images[0] || '';
 
   const now = new Date().toISOString();
 
   const payload = {
     id_unico: post.id_unico,
     type: 'comunidad',
+    source: post.source || 'scraping',
     author_name: post.author_name || 'Desconocido',
     author_id: post.author_id || '',
     group_name: post.group_name || '',
     group_url: post.group_url || '',
     content: post.content || '',
     images,
+    imagesV2,
+    imgMiniatura,
     video_links: Array.isArray(post.video_links) ? post.video_links : [],
     tags: Array.isArray(post.tags) ? post.tags : [],
     post_url: postUrl,
@@ -112,6 +147,27 @@ function mapImagesToPublicUrls(images) {
     const relativePath = path.relative(imageRoot, absolutePath).replace(/\\/g, '/');
     return `${baseUrl}/${encodeURI(relativePath)}`;
   });
+}
+
+function deriveThumbnailPublicUrl(imageUrl) {
+  const value = String(imageUrl || '').trim();
+  if (!value) return value;
+
+  try {
+    const urlObj = new URL(value);
+    const extIndex = urlObj.pathname.lastIndexOf('.');
+    if (extIndex > 0 && !urlObj.pathname.slice(0, extIndex).endsWith('_')) {
+      urlObj.pathname = `${urlObj.pathname.slice(0, extIndex)}_${urlObj.pathname.slice(extIndex)}`;
+      return urlObj.toString();
+    }
+  } catch {
+    const match = value.match(/(.*)(\.[a-zA-Z0-9]+)(\?.*)?$/);
+    if (match && !match[1].endsWith('_')) {
+      return `${match[1]}_${match[2]}${match[3] || ''}`;
+    }
+  }
+
+  return value;
 }
 
 module.exports = { syncToFirebase };

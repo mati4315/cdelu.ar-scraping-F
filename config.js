@@ -53,7 +53,7 @@ module.exports = {
 
   // ─── Scraping ──────────────────────────────────────────────
   scraping: {
-    maxPostsPerRun: parseInt(process.env.MAX_POSTS_PER_RUN, 10) || 40,
+    maxPostsPerRun: parseInt(process.env.MAX_POSTS_PER_RUN, 10) || 2,
     minDelayMs: parseInt(process.env.MIN_DELAY_MS, 10) || 4000,
     maxDelayMs: parseInt(process.env.MAX_DELAY_MS, 10) || 12000,
     requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 15000,

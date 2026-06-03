@@ -695,6 +695,36 @@ class FacebookScraper {
     let imagePaths = post.images || [];
     if (config.scraping.downloadImages && imagePaths.length > 0) {
       imagePaths = await this._downloadImages(post.group_name || post.story_id, imagePaths);
+      // Convertir paths locales a URLs públicas
+      const imageDir = path.resolve(config.scraping.imageDir);
+      const publicBase = config.scraping.imagePublicBaseUrl.replace(/\/+$/, '');
+      imagePaths = imagePaths.map(p => {
+        // Si ya es URL (http/https), dejarla como está
+        if (p.startsWith('http://') || p.startsWith('https://')) return p;
+        // Normalizar path (Windows \\ -> /)
+        const absPath = path.resolve(p).replace(/\\/g, '/');
+        const normalizedDir = imageDir.replace(/\\/g, '/').replace(/\/+$/, '');
+        // Si el path tiene /public_html/images/... extraer la parte relativa después de /images/
+        const pubMatch = absPath.match(/\/images\/(.+)$/);
+        if (pubMatch) {
+          return publicBase + '/' + pubMatch[1];
+        }
+        // Si empieza con normalizedDir
+        if (absPath.startsWith(normalizedDir + '/')) {
+          const relative = absPath.substring(normalizedDir.length + 1);
+          return publicBase + '/' + relative;
+        }
+        if (absPath.startsWith(normalizedDir)) {
+          const relative = absPath.substring(normalizedDir.length).replace(/^\//, '');
+          return publicBase + '/' + relative;
+        }
+        // Si empieza con images/ (relativo)
+        if (p.startsWith('images/')) {
+          return publicBase + '/' + p;
+        }
+        // Fallback: devolver el path original
+        return p;
+      });
     }
 
     logger.debug(`  Medios detectados: ${imagePaths.length} imagen(es), ${(post.videos || []).length} video(s).`);
