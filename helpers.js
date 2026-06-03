@@ -146,6 +146,66 @@ function saveSessionState(state) {
   fs.writeFileSync(config.session.stateFile, JSON.stringify(state, null, 2));
 }
 
+
+// -----------------------------------------------------------------------------
+// PUBLICATION RATE LIMIT
+// -----------------------------------------------------------------------------
+
+function loadPublicationState() {
+  const file = config.publication.stateFile;
+  const fallback = { publishedAt: [] };
+
+  if (!fs.existsSync(file)) return fallback;
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const publishedAt = Array.isArray(raw.publishedAt) ? raw.publishedAt : [];
+    return {
+      publishedAt: publishedAt
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function savePublicationState(state) {
+  const file = config.publication.stateFile;
+  fs.writeFileSync(file, JSON.stringify(state, null, 2));
+}
+
+function claimPublicationSlot() {
+  const now = Date.now();
+  const windowMs = config.publication.windowMinutes * 60 * 1000;
+  const limit = config.publication.maxPostsPerWindow;
+  const state = loadPublicationState();
+  const publishedAt = state.publishedAt.filter((ts) => now - ts < windowMs);
+
+  if (publishedAt.length >= limit) {
+    state.publishedAt = publishedAt;
+    savePublicationState(state);
+    return {
+      allowed: false,
+      remaining: 0,
+      published: publishedAt.length,
+      limit,
+      windowMinutes: config.publication.windowMinutes,
+    };
+  }
+
+  publishedAt.push(now);
+  state.publishedAt = publishedAt;
+  savePublicationState(state);
+
+  return {
+    allowed: true,
+    remaining: Math.max(0, limit - publishedAt.length),
+    published: publishedAt.length,
+    limit,
+    windowMinutes: config.publication.windowMinutes,
+  };
+}
 // ═══════════════════════════════════════════════════════════════
 // COOKIES
 // ═══════════════════════════════════════════════════════════════
@@ -608,6 +668,9 @@ module.exports = {
   resetCooldown,
   loadSessionState,
   saveSessionState,
+  loadPublicationState,
+  savePublicationState,
+  claimPublicationSlot,
   loadCookies,
   cookiesToHeader,
   mergeCookies,

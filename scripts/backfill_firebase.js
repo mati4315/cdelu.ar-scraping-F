@@ -75,9 +75,13 @@ async function main() {
     try {
       const oldImages = Array.isArray(post.images) ? post.images : [];
       const newImages = mapImagesToPublicUrls(oldImages);
+      const newImagesV2 = newImages.map((url) => ({ url }));
+      const newImgMiniatura = newImages[0] || '';
 
       const changed = oldImages.length !== newImages.length ||
-        oldImages.some((v, i) => v !== newImages[i]);
+        oldImages.some((v, i) => v !== newImages[i]) ||
+        JSON.stringify(post.imagesV2 || []) !== JSON.stringify(newImagesV2) ||
+        (post.imgMiniatura || '') !== newImgMiniatura;
 
       if (!changed) {
         skipped++;
@@ -85,6 +89,8 @@ async function main() {
       }
 
       await ref.child(id).child('images').set(newImages);
+      await ref.child(id).child('imagesV2').set(newImagesV2);
+      await ref.child(id).child('imgMiniatura').set(newImgMiniatura);
       console.log(`  [OK] ${id}: ${oldImages.length} -> ${newImages.length} imagenes`);
       updated++;
     } catch (err) {

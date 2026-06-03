@@ -24,6 +24,7 @@ const {
   resetCooldown,
   loadSessionState,
   saveSessionState,
+  claimPublicationSlot,
   sendTelegramAlert,
   sendTelegramPhoto,
   sendTelegramToChat,
@@ -133,14 +134,24 @@ async function main() {
 
     // 11. Enviar contenido de cada post nuevo por Telegram (a todos los destinos)
     if (stats.newPosts && stats.newPosts.length > 0) {
+      const postsToPublish = [];
+
       for (const post of stats.newPosts) {
-        await broadcastPost(post);
-        // Pequena pausa entre mensajes para no saturar la API
-        await new Promise(r => setTimeout(r, 500));
+        const slot = claimPublicationSlot();
+        if (!slot.allowed) {
+          logger.warn(
+            `Límite de publicación alcanzado: ${slot.published}/${slot.limit} en ${slot.windowMinutes} min. ` +
+            'Se omiten los posts restantes de esta corrida.'
+          );
+          break;
+        }
+
+        postsToPublish.push(post);
       }
 
-      // 12. Sincronizar posts nuevos con Firebase (Comunidad)
-      for (const post of stats.newPosts) {
+      for (const post of postsToPublish) {
+        await broadcastPost(post);
+
         await syncToFirebase({
           id_unico: post.id,
           author_name: post.author,
@@ -153,7 +164,13 @@ async function main() {
           tags: post.tags || [],
           post_url: post.post_url,
         });
-        await new Promise(r => setTimeout(r, 300));
+
+        // Pequeña pausa entre publicaciones para no saturar Telegram/Firebase
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      if (stats.newPosts.length > postsToPublish.length) {
+        logger.info(`Publicados ${postsToPublish.length} de ${stats.newPosts.length} posts nuevos por límite de ventana.`);
       }
     }
 

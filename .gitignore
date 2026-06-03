@@ -4,6 +4,7 @@ images/
 *.lock
 cooldown.json
 session_state.json
+publication_state.json
 debug_*.html
 debug_*.js
 test_*.js

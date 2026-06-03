@@ -28,6 +28,69 @@ try {
   sharp = null;
 }
 
+function getImageDimensionsFromBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 10) return null;
+
+  // PNG
+  if (buffer.length >= 24 &&
+      buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47 &&
+      buffer[4] === 0x0d && buffer[5] === 0x0a && buffer[6] === 0x1a && buffer[7] === 0x0a) {
+    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  }
+
+  // GIF
+  if (buffer.length >= 10 &&
+      buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) {
+    return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+  }
+
+  // JPEG
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+    let offset = 2;
+    while (offset + 9 < buffer.length) {
+      if (buffer[offset] !== 0xff) {
+        offset++;
+        continue;
+      }
+
+      let marker = buffer[offset + 1];
+      while (marker === 0xff && offset + 1 < buffer.length) {
+        offset++;
+        marker = buffer[offset + 1];
+      }
+
+      if (marker === 0xd9 || marker === 0xda) break;
+      const blockLength = buffer.readUInt16BE(offset + 2);
+      if (blockLength < 2 || offset + 2 + blockLength > buffer.length) break;
+
+      const sof =
+        (marker >= 0xc0 && marker <= 0xc3) ||
+        (marker >= 0xc5 && marker <= 0xc7) ||
+        (marker >= 0xc9 && marker <= 0xcb) ||
+        (marker >= 0xcd && marker <= 0xcf);
+      if (sof && offset + 9 < buffer.length) {
+        return {
+          height: buffer.readUInt16BE(offset + 5),
+          width: buffer.readUInt16BE(offset + 7),
+        };
+      }
+
+      offset += 2 + blockLength;
+    }
+  }
+
+  return null;
+}
+
+function isImageBelowMinimumDimensions(dimensions) {
+  if (!dimensions || !dimensions.width || !dimensions.height) return false;
+  const minWidth = Math.max(1, config.scraping.minImageWidth || 180);
+  const minHeight = Math.max(1, config.scraping.minImageHeight || 180);
+  const minPixels = Math.max(1, config.scraping.minImagePixels || 40000);
+  const pixels = dimensions.width * dimensions.height;
+  return dimensions.width < minWidth || dimensions.height < minHeight || pixels < minPixels;
+}
+
 class FacebookScraper {
   constructor(batchId) {
     this.batchId = batchId;
@@ -727,6 +790,12 @@ class FacebookScraper {
       });
     }
 
+    if (!post.text && (!imagePaths || imagePaths.length === 0) && (!post.videos || post.videos.length === 0)) {
+      this.stats.postsSkipped++;
+      logger.debug('  Post descartado: sin contenido útil tras filtrar imágenes de baja resolución.');
+      return;
+    }
+
     logger.debug(`  Medios detectados: ${imagePaths.length} imagen(es), ${(post.videos || []).length} video(s).`);
 
     // id_unico: author_id + mes + semana_mes + primeros_20_chars_limpios_del_contenido
@@ -856,6 +925,14 @@ class FacebookScraper {
         }
 
         if (existingPath) {
+          const existingBuffer = fs.readFileSync(existingPath);
+          const existingDimensions = getImageDimensionsFromBuffer(existingBuffer);
+          if (isImageBelowMinimumDimensions(existingDimensions)) {
+            logger.debug(
+              `    Imagen existente descartada por baja resolución: ${existingDimensions.width}x${existingDimensions.height} (${path.basename(existingPath)})`
+            );
+            continue;
+          }
           await this._compressImageIfNeeded(existingPath);
           localPaths.push(existingPath);
           await this._createThumbnail(existingPath);
@@ -876,6 +953,14 @@ class FacebookScraper {
         const contentType = String(resp.headers['content-type'] || '').toLowerCase();
         if (!contentType.startsWith('image/')) {
           throw new Error(`respuesta no es imagen (${contentType || 'sin content-type'})`);
+        }
+
+        const dimensions = getImageDimensionsFromBuffer(Buffer.from(resp.data));
+        if (isImageBelowMinimumDimensions(dimensions)) {
+          logger.debug(
+            `    Imagen descartada por baja resolución: ${dimensions.width}x${dimensions.height} (${filename})`
+          );
+          continue;
         }
 
         fs.writeFileSync(filepath, Buffer.from(resp.data));

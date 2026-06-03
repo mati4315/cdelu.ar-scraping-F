@@ -1,4 +1,6 @@
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 
 module.exports = {
   // ─── MySQL ─────────────────────────────────────────────────
@@ -59,7 +61,6 @@ module.exports = {
     requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 15000,
     maxPages: parseInt(process.env.MAX_PAGES, 10) || 5,
     downloadImages: process.env.DOWNLOAD_IMAGES === 'true',
-    imageDir: process.env.IMAGE_DIR || './images',
     imagePublicBaseUrl: process.env.IMAGE_PUBLIC_BASE_URL || '',
     generateThumbnails: process.env.GENERATE_THUMBNAILS !== 'false',
     thumbnailWidth: parseInt(process.env.THUMBNAIL_WIDTH, 10) || 500,
@@ -69,7 +70,27 @@ module.exports = {
     compressImages: process.env.COMPRESS_IMAGES !== 'false',
     maxImageSizeKb: parseInt(process.env.MAX_IMAGE_SIZE_KB, 10) || 500,
     imageCompressionQuality: parseInt(process.env.IMAGE_COMPRESSION_QUALITY, 10) || 82,
+    imageDir: (() => {
+      // Production invariant:
+      // Hostinger must write to /public_html/images so the web can serve files.
+      // If IMAGE_DIR is not an absolute path, prefer the public folder when it exists.
+      const envValue = String(process.env.IMAGE_DIR || '').trim();
+      const publicDir = path.resolve(__dirname, '../public_html/images');
+      if (envValue && path.isAbsolute(envValue)) return envValue;
+      if (fs.existsSync(publicDir)) return publicDir;
+      return envValue || './images';
+    })(),
+    minImageWidth: parseInt(process.env.MIN_IMAGE_WIDTH, 10) || 180,
+    minImageHeight: parseInt(process.env.MIN_IMAGE_HEIGHT, 10) || 180,
+    minImagePixels: parseInt(process.env.MIN_IMAGE_PIXELS, 10) || 40000,
   },
+
+  publication: {
+    maxPostsPerWindow: parseInt(process.env.MAX_PUBLICATIONS_PER_WINDOW, 10) || 2,
+    windowMinutes: parseInt(process.env.PUBLICATION_WINDOW_MINUTES, 10) || 30,
+    stateFile: './publication_state.json',
+  },
+
 
   // ─── Human Behavior Simulation ──────────────────────────────
   human: {

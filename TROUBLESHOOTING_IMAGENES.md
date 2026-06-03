@@ -2,6 +2,7 @@
 
 > Documento para consultar cuando las imágenes no se cargan en la web o en Firebase.
 > Creado: 2026-06-01 (fix aplicado)
+> Regla de oro: en producción, las imágenes deben vivir en `public_html/images` y las URLs públicas deben empezar con `https://bot.cdelu.io/images/`.
 
 ---
 
@@ -94,6 +95,12 @@ Las URLs en la DB de MySQL (`fb_posts.images`) y Firebase (`/c/{id_unico}/images
 5. **Después de tocar el fix de URLs**, SIEMPRE:
    - Correr `restore_images_db.js` (para limpiar la DB)
    - Correr `sync_all_firebase.js` (para sincronizar a Firebase)
+6. Para evitar im�genes diminutas o �conos disfrazados de foto, el scraper descarta im�genes por resoluci�n m�nima antes de guardarlas.
+   - Umbral actual: `MIN_IMAGE_WIDTH`, `MIN_IMAGE_HEIGHT`, `MIN_IMAGE_PIXELS`
+7. Si una refactorización vuelve a tocar `IMAGE_DIR`, revisá esta nota antes de cambiar código:
+   - `IMAGE_DIR` de producción debe resolver a `.../public_html/images`
+   - `nodejs/images` no debe ser la carpeta final de producción
+   - Si algo rompe, la primera verificación es `check_config.js`
 
 ## Config de Directorios
 
@@ -105,6 +112,7 @@ Las URLs en la DB de MySQL (`fb_posts.images`) y Firebase (`/c/{id_unico}/images
 
 > **IMPORTANTE**: Si corrés el scraper desde tu PC local con `IMAGE_DIR=./images`, las imágenes se descargan en tu PC pero NO se suben al server. La URL pública apunta a Hostinger, no a tu PC. Para desarrollo local usá `DRY_RUN=true` o asegurate de que `IMAGE_DIR` apunte a `public_html/images/` del server.
 
+> Si ves imágenes rotas en producción, la ruta correcta para revisar es `public_html/images`, no `nodejs/images`.
 ---
 
 *Referencia: bug reportado por Matias el 2026-06-01. Fix en scraper.js, línea ~696.*

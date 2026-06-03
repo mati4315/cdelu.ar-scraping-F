@@ -46,19 +46,13 @@ async function syncToFirebase(post) {
     .map((entry) => {
       if (typeof entry === 'string') {
         const url = mapImagesToPublicUrls([entry])[0] || '';
-        return url ? { url, thumbUrl: deriveThumbnailPublicUrl(url) } : null;
+        return url ? { url } : null;
       }
       if (!entry || typeof entry !== 'object') return null;
 
       const url = mapImagesToPublicUrls([entry.url])[0] || '';
       if (!url) return null;
-      const thumbUrl =
-        mapImagesToPublicUrls([entry.thumbUrl || entry.thumbnailUrl || entry.thumbnail || entry.imgMiniatura || entry.img_miniatura])[0] ||
-        deriveThumbnailPublicUrl(url);
-      return {
-        url,
-        thumbUrl: thumbUrl || deriveThumbnailPublicUrl(url)
-      };
+      return { url };
     })
     .filter(Boolean);
 
@@ -68,12 +62,9 @@ async function syncToFirebase(post) {
 
   const imagesV2 = normalizedImagesV2.length > 0
     ? normalizedImagesV2
-    : images.map((url, index) => ({
-        url,
-        thumbUrl: index === 0 ? deriveThumbnailPublicUrl(url) : deriveThumbnailPublicUrl(url)
-      }));
+    : images.map((url) => ({ url }));
 
-  const imgMiniatura = imagesV2[0]?.thumbUrl || images[0] || '';
+  const imgMiniatura = images[0] || '';
 
   const now = new Date().toISOString();
 
@@ -147,27 +138,6 @@ function mapImagesToPublicUrls(images) {
     const relativePath = path.relative(imageRoot, absolutePath).replace(/\\/g, '/');
     return `${baseUrl}/${encodeURI(relativePath)}`;
   });
-}
-
-function deriveThumbnailPublicUrl(imageUrl) {
-  const value = String(imageUrl || '').trim();
-  if (!value) return value;
-
-  try {
-    const urlObj = new URL(value);
-    const extIndex = urlObj.pathname.lastIndexOf('.');
-    if (extIndex > 0 && !urlObj.pathname.slice(0, extIndex).endsWith('_')) {
-      urlObj.pathname = `${urlObj.pathname.slice(0, extIndex)}_${urlObj.pathname.slice(extIndex)}`;
-      return urlObj.toString();
-    }
-  } catch {
-    const match = value.match(/(.*)(\.[a-zA-Z0-9]+)(\?.*)?$/);
-    if (match && !match[1].endsWith('_')) {
-      return `${match[1]}_${match[2]}${match[3] || ''}`;
-    }
-  }
-
-  return value;
 }
 
 module.exports = { syncToFirebase };
