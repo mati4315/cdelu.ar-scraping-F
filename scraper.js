@@ -1015,15 +1015,7 @@ class FacebookScraper {
           headers: {
             'User-Agent': this._uaProfile.ua,
             'Referer': 'https://www.facebook.com/',
-            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-            'Accept-Language': 'es-ES,es;q=0.9',
-            'Sec-Fetch-Dest': 'image',
-            'Sec-Fetch-Mode': 'no-cors',
-            'Sec-Fetch-Site': 'cross-site',
-            'Priority': 'u=4, i',
           },
-          httpsAgent: this._httpsAgent,
-          httpAgent: this._httpsAgent,
         });
 
         const contentType = String(resp.headers['content-type'] || '').toLowerCase();
