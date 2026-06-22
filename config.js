@@ -129,6 +129,46 @@ module.exports = {
     ],
   },
 
+  // ─── Proxy Rotation ───────────────────────────────────────
+  // Lista de proxies HTTP/HTTPS (formato: http://user:pass@host:port o http://host:port)
+  // Si tiene más de uno, rota aleatoriamente por request.
+  // Importante: usar proxies residenciales/ISP, NO datacenter (Facebook los bloquea).
+  proxies: (() => {
+    const raw = process.env.PROXY_LIST || '';
+    if (!raw) return [];
+    return raw.split(',').map(s => s.trim()).filter(Boolean);
+  })(),
+
+  // ─── TLS Fingerprint Evasion ──────────────────────────────
+  // Configuración para suavizar la huella TLS de Node.js
+  tls: {
+    // Cipher suite ordenado como Chrome 125 (más realista)
+    ciphers: [
+      'TLS_AES_128_GCM_SHA256',
+      'TLS_AES_256_GCM_SHA384',
+      'TLS_CHACHA20_POLY1305_SHA256',
+      'ECDHE-ECDSA-AES128-GCM-SHA256',
+      'ECDHE-RSA-AES128-GCM-SHA256',
+      'ECDHE-ECDSA-AES256-GCM-SHA384',
+      'ECDHE-RSA-AES256-GCM-SHA384',
+      'ECDHE-ECDSA-CHACHA20-POLY1305',
+      'ECDHE-RSA-CHACHA20-POLY1305',
+      'ECDHE-RSA-AES128-SHA',
+      'ECDHE-RSA-AES256-SHA',
+      'AES128-GCM-SHA256',
+      'AES256-GCM-SHA384',
+      'AES128-SHA',
+      'AES256-SHA',
+    ].join(':'),
+    // Deshabilitar SSLv3 y TLSv1.0/1.1 (obsoletos, los navegadores no los usan)
+    minVersion: 'TLSv1.2',
+    maxVersion: 'TLSv1.3',
+    // ECDH curve preferida por Chrome
+    ecdhCurve: 'X25519:prime256v1:secp384r1',
+    // No enviar extensión SNI vacía (poco común en navegadores)
+    honorCipherOrder: true,
+  },
+
   // ─── Circuit Breaker ───────────────────────────────────────
   cooldown: {
     baseMinutes: parseInt(process.env.COOLDOWN_BASE_MINUTES, 10) || 30,
@@ -146,15 +186,65 @@ module.exports = {
     stateFile: './session_state.json',
   },
 
-  // ─── User Agents ───────────────────────────────────────────
-  // www.facebook.com requiere User-Agents de escritorio para servir el SSR completo
-  userAgents: [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0',
+  // ─── User Agent Profiles (UA + sec-ch-ua + platform) ──────
+  // Cada perfil agrupa el User-Agent con sus headers Client Hints correctos.
+  // Chrome 84+ SIEMPRE envía sec-ch-ua. Su ausencia es un flag de bot.
+  userAgentProfiles: [
+    {
+      ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+      secChUa: '"Chromium";v="125", "Google Chrome";v="125", "Not-A.Brand";v="99"',
+      secChUaPlatform: '"Windows"',
+      secChUaMobile: '?0',
+      platform: 'Win32',
+      viewportWidth: 1920,
+      viewportHeight: 1080,
+      devicePixelRatio: 1,
+    },
+    {
+      ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      secChUa: '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"',
+      secChUaPlatform: '"Windows"',
+      secChUaMobile: '?0',
+      platform: 'Win32',
+      viewportWidth: 1366,
+      viewportHeight: 768,
+      devicePixelRatio: 1,
+    },
+    {
+      ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+      secChUa: '"Chromium";v="125", "Google Chrome";v="125", "Not-A.Brand";v="99"',
+      secChUaPlatform: '"macOS"',
+      secChUaMobile: '?0',
+      platform: 'MacIntel',
+      viewportWidth: 1680,
+      viewportHeight: 1050,
+      devicePixelRatio: 2,
+    },
+    {
+      ua: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+      secChUa: '"Chromium";v="127", "Google Chrome";v="127", "Not-A.Brand";v="99"',
+      secChUaPlatform: '"Linux"',
+      secChUaMobile: '?0',
+      platform: 'Linux x86_64',
+      viewportWidth: 1920,
+      viewportHeight: 1080,
+      devicePixelRatio: 1,
+    },
+    {
+      ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0',
+      secChUa: '',        // Firefox no envía sec-ch-ua
+      secChUaPlatform: '',
+      secChUaMobile: '',
+      platform: 'Win32',
+      viewportWidth: 1536,
+      viewportHeight: 864,
+      devicePixelRatio: 1.25,
+    },
   ],
+  // Compatibilidad hacia atrás: array simple de UAs
+  get userAgents() {
+    return this.userAgentProfiles.map(p => p.ua);
+  },
 
   // ─── Logging ───────────────────────────────────────────────
   logging: {

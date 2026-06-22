@@ -11,7 +11,7 @@ const {
   cookiesToHeader,
   mergeCookies,
   saveCookies,
-  getRandomUserAgent,
+  getRandomUserAgentProfile,
   retryWithBackoff,
   filterValidImages,
   isValidContent,
@@ -19,6 +19,11 @@ const {
   isFbSpinnerOrIcon,
   triggerCooldown,
 } = require('./helpers');
+const {
+  createBrowserLikeHttpsAgent,
+  getProxyUrl,
+  getCurrentProxyUrl,
+} = require('./tls');
 const db = require('./db');
 
 let sharp = null;
@@ -96,7 +101,8 @@ class FacebookScraper {
     this.batchId = batchId;
     this.cookies = null;
     this.cookieHeader = '';
-    this.userAgent = getRandomUserAgent();
+    this._uaProfile = getRandomUserAgentProfile();
+    this._httpsAgent = null;
     this.stats = {
       postsNew: 0,
       postsUpdated: 0,
@@ -105,6 +111,7 @@ class FacebookScraper {
       pagesScraped: 0,
       errors: 0,
       newPosts: [],
+      sessionLost: false,   // Indica si la sesion se perdio durante el scraping
     };
     this.shouldStop = false;
     this.totalPostsProcessed = 0;
@@ -120,30 +127,75 @@ class FacebookScraper {
     this.cookies = loadCookies();
     if (!this.cookies) throw new Error('No se pudieron cargar las cookies.');
     this.cookieHeader = cookiesToHeader(this.cookies);
-    logger.info(`Sesión iniciada. UA rotativo por request. Ejemplo: ${getRandomUserAgent().substring(0, 60)}...`);
+
+    // Validar cookies criticas (Facebook las requiere para identificar sesion real)
+    const criticalCookies = ['datr', 'c_user', 'xs', 'sb'];
+    const cookieNames = new Set(this.cookies.map(c => c.name || c.key));
+    const missing = criticalCookies.filter(c => !cookieNames.has(c));
+    if (missing.length > 0) {
+      logger.warn(`Cookies criticas ausentes: ${missing.join(', ')}. La sesion podria ser debil.`);
+    }
+    // Verificar que las cookies no esten expiradas
+    const now = Date.now() / 1000;
+    for (const c of this.cookies) {
+      if (c.expires && typeof c.expires === 'number' && c.expires < now) {
+        logger.warn(`Cookie "${c.name || c.key}" expirada (${new Date(c.expires * 1000).toISOString()}). La sesion podria fallar.`);
+      }
+    }
+
+    this._uaProfile = getRandomUserAgentProfile();
+    // Crear agente TLS con fingerprint similar a navegador (+ proxy si hay)
+    const proxyUrl = getProxyUrl();
+    this._httpsAgent = createBrowserLikeHttpsAgent(proxyUrl);
+    const proxyLabel = proxyUrl ? ` (proxy: ${proxyUrl.split('@').pop()})` : '';
+    logger.info(`Sesión iniciada. UA: ${this._uaProfile.ua.substring(0, 60)}...${proxyLabel}`);
   }
 
   _getHumanHeaders() {
+    // Rotar perfil cada N requests para simular cambios de sesion/navegador
+    // pero mantener consistencia dentro de una misma "pagina"
+    const profile = this._uaProfile;
+
     const lang = config.headerVariants.acceptLanguage[
       Math.floor(Math.random() * config.headerVariants.acceptLanguage.length)
     ];
     const accept = config.headerVariants.accept[
       Math.floor(Math.random() * config.headerVariants.accept.length)
     ];
-    return {
-      'User-Agent': getRandomUserAgent(),
+
+    const headers = {
+      'User-Agent': profile.ua,
       'Accept': accept,
       'Accept-Language': lang,
       'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': Math.random() > 0.5 ? 'max-age=0' : 'no-cache',
       'Sec-Fetch-Dest': 'document',
       'Sec-Fetch-Mode': 'navigate',
       'Sec-Fetch-Site': 'none',
       'Sec-Fetch-User': '?1',
       'Upgrade-Insecure-Requests': '1',
-      'Cache-Control': Math.random() > 0.5 ? 'max-age=0' : 'no-cache',
       'Cookie': this.cookieHeader,
       'Referer': 'https://www.facebook.com/',
+      // Prioridad de recursos (Chrome 101+)
+      'Priority': 'u=0, i',
     };
+
+    // Chrome 84+ envia SIEMPRE estos headers. Su ausencia = bot flag.
+    if (profile.secChUa) {
+      headers['Sec-Ch-Ua'] = profile.secChUa;
+      headers['Sec-Ch-Ua-Mobile'] = profile.secChUaMobile;
+      headers['Sec-Ch-Ua-Platform'] = profile.secChUaPlatform;
+    }
+
+    // Client Hints de viewport (Chrome las envia en main frame requests)
+    if (profile.viewportWidth) {
+      headers['Viewport-Width'] = String(profile.viewportWidth);
+    }
+    if (profile.devicePixelRatio) {
+      headers['DPR'] = String(profile.devicePixelRatio);
+    }
+
+    return headers;
   }
 
   get headers() {
@@ -158,6 +210,8 @@ class FacebookScraper {
         timeout: config.scraping.requestTimeoutMs,
         maxRedirects: 0,
         validateStatus: (s) => s < 400,
+        httpsAgent: this._httpsAgent,
+        httpAgent: this._httpsAgent,
       });
       this._processSetCookies(resp.headers['set-cookie']);
       const html = resp.data;
@@ -182,6 +236,17 @@ class FacebookScraper {
   async scrape() {
     const feedUrls = config.fb.feedUrls || [config.fb.homeUrl];
     let totalPagesScraped = 0;
+
+    // Simular que el usuario llego a la pagina principal primero (warm-up)
+    logger.info('Calentando sesion: visitando homepage...');
+    try {
+      await this._fetchPage('https://www.facebook.com/');
+      const settlingMs = 1500 + Math.floor(Math.random() * 2500);
+      await sleep(settlingMs);
+      logger.info('Homepage cargada. Iniciando scraping de feeds.');
+    } catch (err) {
+      logger.warn(`Warm-up homepage fallo: ${err.message}. Continuando...`);
+    }
 
     for (let fi = 0; fi < feedUrls.length && !this.shouldStop; fi++) {
       const feedUrl = feedUrls[fi];
@@ -219,6 +284,7 @@ class FacebookScraper {
         }
 
         if (this._detectLoginPage(html) || this._detectCheckpoint(html)) {
+          this.stats.sessionLost = true;
           triggerCooldown('SESSION_LOST_DURING_SCRAPE');
           this.shouldStop = true;
           break;
@@ -264,6 +330,8 @@ class FacebookScraper {
           const nextUrl = this._extractNextPageUrl(html, currentUrl);
           if (nextUrl) {
             currentUrl = nextUrl;
+            // Rotar perfil de UA entre paginas (cambia sec-ch-ua, viewport, etc.)
+            this._rotateProfile();
             const delay = this._naturalDelay(config.scraping.minDelayMs, config.scraping.maxDelayMs);
             logger.debug(`Pausa de ${delay}ms antes de siguiente página...`);
             await sleep(delay);
@@ -945,9 +1013,17 @@ class FacebookScraper {
           timeout: 15000,
           maxContentLength: 15 * 1024 * 1024,
           headers: {
-            'User-Agent': getRandomUserAgent(),
+            'User-Agent': this._uaProfile.ua,
             'Referer': 'https://www.facebook.com/',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'es-ES,es;q=0.9',
+            'Sec-Fetch-Dest': 'image',
+            'Sec-Fetch-Mode': 'no-cors',
+            'Sec-Fetch-Site': 'cross-site',
+            'Priority': 'u=4, i',
           },
+          httpsAgent: this._httpsAgent,
+          httpAgent: this._httpsAgent,
         });
 
         const contentType = String(resp.headers['content-type'] || '').toLowerCase();
@@ -1114,6 +1190,10 @@ class FacebookScraper {
         timeout: config.scraping.requestTimeoutMs,
         maxRedirects: 5,
         validateStatus: (s) => s >= 200 && s < 400,
+        httpsAgent: this._httpsAgent,
+        httpAgent: this._httpsAgent,
+        // Deshabilitar el agente por defecto de axios para usar nuestro TLS
+        maxContentLength: 10 * 1024 * 1024,
       });
       this._processSetCookies(resp.headers['set-cookie']);
       return resp.data;
@@ -1130,6 +1210,7 @@ class FacebookScraper {
 
   _detectLoginPage(html) {
     if (!html) return false;
+    if (html.length < 200) return false;
     return /name="email"/.test(html) && /name="pass"/.test(html) ||
            /"login_form"/.test(html) ||
            /id="loginbutton"/.test(html);
@@ -1137,9 +1218,14 @@ class FacebookScraper {
 
   _detectCheckpoint(html) {
     if (!html) return false;
+    if (html.length < 200) return false;
     return /\/checkpoint\//.test(html) ||
            /security check/i.test(html) ||
-           /confirm your identity/i.test(html);
+           /confirm your identity/i.test(html) ||
+           /suspicious (login )?activity/i.test(html) ||
+           /unusual (login )?activity/i.test(html) ||
+           /\/two_factor\//.test(html) ||
+           /login (approval|code)/i.test(html);
   }
 
   _naturalDelay(min, max) {
@@ -1173,6 +1259,19 @@ class FacebookScraper {
         this._postCountSinceDistraction = 0;
       }
     }
+  }
+
+  _rotateProfile() {
+    const newProfile = getRandomUserAgentProfile();
+    // Si hay mas de un perfil, evitar repetir el mismo
+    if (config.userAgentProfiles.length > 1 && newProfile.ua === this._uaProfile.ua) {
+      const others = config.userAgentProfiles.filter(p => p.ua !== this._uaProfile.ua);
+      if (others.length > 0) {
+        this._uaProfile = others[Math.floor(Math.random() * others.length)];
+        return;
+      }
+    }
+    this._uaProfile = newProfile;
   }
 
   _extractNextPageUrl(html, currentUrl) {

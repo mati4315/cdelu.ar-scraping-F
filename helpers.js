@@ -218,8 +218,20 @@ function loadCookies() {
   }
   try {
     const raw = fs.readFileSync(file, 'utf8');
-    const cookies = JSON.parse(raw);
-    return cookies;
+    let cookies = JSON.parse(raw);
+    // Filtrar cookies con valor "deleted" o vacias
+    const valid = cookies.filter(c => {
+      const val = c.value || '';
+      if (val === 'deleted' || val === '') {
+        logger.warn(`Cookie "${c.name || c.key}" ignorada: valor "deleted". Re-exporta tus cookies del navegador.`);
+        return false;
+      }
+      return true;
+    });
+    if (valid.length < cookies.length) {
+      logger.info(`Se ignoraron ${cookies.length - valid.length} cookie(s) corrupta(s).`);
+    }
+    return valid;
   } catch (err) {
     logger.error(`Error parseando cookies: ${err.message}`);
     return null;
@@ -228,11 +240,18 @@ function loadCookies() {
 
 function cookiesToHeader(cookies) {
   if (!cookies || !Array.isArray(cookies)) return '';
-  return cookies.map((c) => `${c.name || c.key}=${c.value}`).join('; ');
+  return cookies
+    .filter(c => {
+      const val = c.value || '';
+      return val !== 'deleted' && val !== '';
+    })
+    .map((c) => `${c.name || c.key}=${c.value}`)
+    .join('; ');
 }
 
 /**
  * Parsea encabezados Set-Cookie de respuestas HTTP y actualiza el array de cookies.
+ * Filtra cookies de eliminacion (valor "deleted", expires en 1970, max-age=0).
  */
 function mergeCookies(existingCookies, setCookieHeaders) {
   if (!setCookieHeaders || setCookieHeaders.length === 0) return existingCookies;
@@ -243,10 +262,46 @@ function mergeCookies(existingCookies, setCookieHeaders) {
   }
 
   for (const header of setCookieHeaders) {
+    // Parsear la directiva expires
+    const expiresMatch = header.match(/expires=([^;]+)/i);
+    const maxAgeMatch = header.match(/max-age=(\d+)/i);
+    
+    // Detectar cookie de eliminacion
+    if (expiresMatch) {
+      const expDate = new Date(expiresMatch[1]);
+      if (expDate.getTime() < Date.now()) {
+        // Cookie expirada - removerla del mapa
+        const parts = header.split(';')[0].split('=');
+        const name = parts[0].trim();
+        if (name) {
+          cookieMap.delete(name);
+          logger.debug(`Cookie "${name}" expirada removida.`);
+        }
+        continue;
+      }
+    }
+    
+    if (maxAgeMatch && parseInt(maxAgeMatch[1], 10) === 0) {
+      const parts = header.split(';')[0].split('=');
+      const name = parts[0].trim();
+      if (name) {
+        cookieMap.delete(name);
+        logger.debug(`Cookie "${name}" max-age=0 removida.`);
+      }
+      continue;
+    }
+    
     const parts = header.split(';')[0].split('=');
     if (parts.length >= 2) {
       const name = parts[0].trim();
       const value = parts.slice(1).join('=').trim();
+      
+      // Ignorar valores "deleted" - Facebook los usa para eliminar cookies
+      if (!name || value === 'deleted' || value === '') {
+        cookieMap.delete(name);
+        continue;
+      }
+      
       cookieMap.set(name, { name, value });
     }
   }
@@ -255,7 +310,9 @@ function mergeCookies(existingCookies, setCookieHeaders) {
 }
 
 function saveCookies(cookies) {
-  fs.writeFileSync(config.fb.cookiesFile, JSON.stringify(cookies, null, 2));
+  // Filtrar cookies con valor "deleted" antes de guardar (por si acaso)
+  const valid = cookies.filter(c => (c.value || '') !== 'deleted');
+  fs.writeFileSync(config.fb.cookiesFile, JSON.stringify(valid, null, 2));
   logger.debug('Cookies actualizadas y guardadas.');
 }
 
@@ -265,6 +322,11 @@ function saveCookies(cookies) {
 
 function getRandomUserAgent() {
   const list = config.userAgents;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+function getRandomUserAgentProfile() {
+  const list = config.userAgentProfiles;
   return list[Math.floor(Math.random() * list.length)];
 }
 
@@ -676,6 +738,7 @@ module.exports = {
   mergeCookies,
   saveCookies,
   getRandomUserAgent,
+  getRandomUserAgentProfile,
   retryWithBackoff,
   isValidPostId,
   extractPostIdFromUrl,

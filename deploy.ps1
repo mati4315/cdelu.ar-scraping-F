@@ -29,6 +29,7 @@ $FILES = @(
     "config.js",
     "db.js",
     "logger.js",
+    "tls.js",
     "server.js",
     "settings.js",
     "settings.schema.js",

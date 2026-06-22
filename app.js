@@ -107,8 +107,12 @@ async function main() {
       await db.finishScrapeRun(BATCH_ID, stats, runStatus);
     }
 
-    // 8. Resetear cooldown tras ejecución exitosa
-    resetCooldown();
+    // 8. Resetear cooldown solo si la sesion no se perdio
+    if (!stats.sessionLost) {
+      resetCooldown();
+    } else {
+      logger.warn('Cooldown mantenido: sesion perdida durante el scraping.');
+    }
 
     // 9. Actualizar session state
     const state = loadSessionState();
